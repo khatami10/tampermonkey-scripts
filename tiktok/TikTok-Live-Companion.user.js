@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.3.0
+// @version      0.3.1
 // @description  Modular TikTok LIVE Battle/PK repair and evidence-based gift tracking tools.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -6377,6 +6377,7 @@ function findGroups(
   let scanTimer = null;
   let renderTimer = null;
   let scanStatus = 'Waiting for LIVE page';
+  let scanPage = null;
   const listeners = [];
   let buses = new WeakSet();
 
@@ -6405,7 +6406,7 @@ function findGroups(
 
   function allFibers(root) {
     const out = [], stack = [root], seen = new Set();
-    while (stack.length && out.length < 18000) {
+    while (stack.length && out.length < 8000) {
       const fiber = stack.pop();
       if (!fiber || typeof fiber !== 'object' || seen.has(fiber)) continue;
       seen.add(fiber); out.push(fiber);
@@ -6416,8 +6417,9 @@ function findGroups(
   }
 
   function eventNames(bus) {
-    const names = new Set(['Gift', 'GiftMessage', 'WebcastGift', 'WebcastGiftMessage', 'message',
-      'Chat', 'Comment', 'WebcastChatMessage', 'Member', 'WebcastMemberMessage', 'Follow', 'WebcastSocialMessage']);
+    // Never invent event names or attach to the generic message/chat stream.
+    // Only observe a gift event that TikTok has already registered on this bus.
+    const names = new Set();
     try {
       if (typeof bus.eventNames === 'function') for (const name of bus.eventNames()) names.add(String(name));
       for (const key of Object.keys(bus).slice(0, 100)) {
@@ -6427,7 +6429,7 @@ function findGroups(
         else if (registry && typeof registry === 'object') for (const name of Object.keys(registry)) names.add(name);
       }
     } catch (_) {}
-    return [...names].filter((name) => /gift|chat|comment|member|join|follow|social|^message$/i.test(name)).slice(0, 60);
+    return [...names].filter((name) => /gift/i.test(name)).slice(0, 20);
   }
 
   function receive(eventName, args) {
@@ -6437,7 +6439,8 @@ function findGroups(
   }
 
   function subscribe(bus) {
-    if (!bus || typeof bus.on !== 'function' || typeof bus.off !== 'function' || buses.has(bus)) return;
+    if (!bus || typeof bus.on !== 'function' || typeof bus.off !== 'function') return false;
+    if (buses.has(bus)) return true;
     const added = [];
     for (const name of eventNames(bus)) {
       const listener = (...args) => receive(name, args);
@@ -6447,7 +6450,9 @@ function findGroups(
       buses.add(bus);
       scanStatus = `Listening for gifts (${busesCount()} source${busesCount() === 1 ? '' : 's'})`;
       scheduleRender();
+      return true;
     }
+    return false;
   }
 
   function busesCount() {
@@ -6460,16 +6465,26 @@ function findGroups(
       scheduleRender();
       return;
     }
+    if (scanPage && scanPage !== location.href) stopListeners();
+    scanPage = location.href;
+    if (busesCount()) {
+      scanStatus = 'Listening safely for gift events';
+      scheduleRender();
+      return;
+    }
     const root = committedRoot();
     if (!root) { scanStatus = 'Waiting for LIVE player'; scheduleRender(); return; }
     const seen = new WeakSet();
     let visited = 0;
+    let found = false;
     function walk(value, depth) {
-      if (!value || typeof value !== 'object' || seen.has(value) || depth > 8 || visited++ > 35000) return;
+      if (found || !value || typeof value !== 'object' || seen.has(value) || depth > 7 || visited++ > 12000) return;
       seen.add(value);
       try {
-        if (value._messageEvents && typeof value._messageEvents.on === 'function') subscribe(value._messageEvents);
-        if (value._config && typeof value.on === 'function' && typeof value.off === 'function') subscribe(value);
+        if (value._messageEvents && typeof value._messageEvents.on === 'function' && subscribe(value._messageEvents)) {
+          found = true;
+          return;
+        }
         for (const key of Object.keys(value).slice(0, 100)) {
           if (['return', 'alternate', 'child', 'sibling', 'stateNode', 'window', 'document'].includes(key)) continue;
           const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -6482,9 +6497,9 @@ function findGroups(
       walk(fiber.updateQueue, 0);
       walk(fiber.memoizedProps, 0);
       walk(fiber.memoizedState, 0);
-      if (visited > 35000) break;
+      if (found || visited > 12000) break;
     }
-    if (!busesCount()) scanStatus = 'Finding TikTok gift events…';
+    if (!busesCount()) scanStatus = 'Waiting for a safe TikTok gift source…';
     scheduleRender();
   }
 
@@ -6493,6 +6508,7 @@ function findGroups(
       try { bus.off(name, listener); } catch (_) {}
     }
     buses = new WeakSet();
+    scanPage = null;
   }
 
   function readPosition() {
@@ -6623,7 +6639,7 @@ function findGroups(
     enabled = true;
     mount();
     scan();
-    if (!scanTimer) scanTimer = setInterval(scan, 4000);
+    if (!scanTimer) scanTimer = setInterval(scan, 15000);
   }
 
   function stop() {
