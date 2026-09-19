@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         TikTok 1V1 + 2V2 AUTO Native Cohost Repair v2.6.7
 // @namespace    https://www.tiktok.com/
-// @version      2.6.8
+// @version      2.6.9
 // @description  Restores native cohost names and 1v1/2v2 battle overlays with guarded automatic monitoring.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
 // @grant        none
+// @homepageURL  https://github.com/khatami10/tampermonkey-scripts
+// @supportURL   https://github.com/khatami10/tampermonkey-scripts/issues
 // @updateURL    https://raw.githubusercontent.com/khatami10/tampermonkey-scripts/main/tiktok/TikTok-Battle-Repair.user.js
 // @downloadURL  https://raw.githubusercontent.com/khatami10/tampermonkey-scripts/main/tiktok/TikTok-Battle-Repair.user.js
 // ==/UserScript==
@@ -658,7 +660,7 @@
             capturedAt:
                 new Date().toISOString(),
 
-            version: '2.6.7',
+            version: '2.6.9',
 
             page:
                 location.href
@@ -668,7 +670,7 @@
     // Read-only diagnostics: never substitute a different room's module.
     function captureNativeState() {
         const result = { capturedAt: new Date().toISOString(), page: location.href,
-            version: '2.6.7', dom: domState(), modules: [], partialModules: [] };
+            version: '2.6.9', dom: domState(), modules: [], partialModules: [] };
         try {
             const root = committedRoot();
             if (!root) return { ...result, discovery: 'NO_REACT_ROOT' };
@@ -1785,7 +1787,7 @@
     }
 
 
-    // v2.6.7: controller.shown can change before React unmounts the Cohost child.
+    // v2.6.9: controller.shown can change before React unmounts the Cohost child.
     // Wait for both signals so useState/useMemo closures are recreated from corrected data.
     async function waitForCohostRemoved(controller, timeoutMs = 2200) {
         const started = Date.now();
@@ -1852,7 +1854,7 @@
     }
 
 
-    // v2.6.7: a fast DOM removal can precede full React effect cleanup. Keep the
+    // v2.6.9: a fast DOM removal can precede full React effect cleanup. Keep the
     // destroy-to-init boundary near 500ms, matching the live-proven successful case.
     async function remountCohost(controller, moduleData, current, battle, armies, sei, report, phase) {
         controller.destroyFn('Cohost');
@@ -2088,7 +2090,7 @@
     }
 
 
-    // v2.6.7: isolated 2v2 observer plus guarded automatic repair. The established
+    // v2.6.9: isolated 2v2 observer plus guarded automatic repair. The established
     // 1v1 observers and repair functions remain unchanged.
     const twoVTwo = { page: null, roomId: null, battle: null, battleAt: 0,
         armies: null, armiesAt: 0, sei: null, seiAt: 0, groupChannelId: null,
@@ -3022,7 +3024,7 @@
 
     function diagnoseBattle() {
         const previousRepair = lastReport;
-        lastReport = { ...makeReportBase(), version: '2.6.7', mode: 'READ_ONLY_DIAGNOSTIC',
+        lastReport = { ...makeReportBase(), version: '2.6.9', mode: 'READ_ONLY_DIAGNOSTIC',
             nativeState: captureNativeState(), previousRepair };
         showReport();
     }
@@ -4346,7 +4348,7 @@ function findGroups(
     }
 
 
-    // v2.6.7 watcher: the full-unmount + native replay path is now live-proven.
+    // v2.6.9 watcher: the full-unmount + native replay path is now live-proven.
     // It handles missing-name/zero-score states automatically and can use the
     // proven room-SEI bootstrap when the entire Cohost layout is absent.
     async function automaticTick() {
@@ -5558,7 +5560,7 @@ function findGroups(
             delete child.dataset.expandedDisplay;
         }
         if (head) {
-            head.textContent = 'TikTok Battle Repair · 2.6.7';
+            head.textContent = 'TikTok Battle Repair · 2.6.9';
             head.title = '';
             Object.assign(head.style, { width: 'auto', height: 'auto', display: 'block',
                 alignItems: '', justifyContent: '', padding: '4px', borderRadius: '0' });
@@ -5602,7 +5604,7 @@ function findGroups(
             background: '#101010', color: '#fff', border: '1px solid #b48cff',
             borderRadius: '5px', padding: '5px', boxSizing: 'border-box', font: '11px Arial' });
         const head = document.createElement('div');
-        head.textContent = 'TikTok Battle Repair · 2.6.7';
+        head.textContent = 'TikTok Battle Repair · 2.6.9';
         Object.assign(head.style, { cursor: 'move', textAlign: 'center', padding: '4px', color: '#b48cff' });
         head.addEventListener('click', () => {
             if (panel.dataset.collapsed === 'true' && panel.dataset.justDragged !== 'true') expandPanel();
