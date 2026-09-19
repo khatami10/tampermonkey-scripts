@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.2.1
-// @description  Modular TikTok LIVE tools, beginning with reliable 1v1/2v2 Battle/PK UI repair.
+// @version      0.3.0
+// @description  Modular TikTok LIVE Battle/PK repair and evidence-based gift tracking tools.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
 // @grant        none
@@ -23,7 +23,7 @@
   const HOST_ID = 'ttlc-control-host';
   const modules = new Map();
   const listeners = new Set();
-  const defaults = { modules: { 'battle-pk': true }, panelPosition: null };
+  const defaults = { modules: { 'battle-pk': true, 'gift-tracker': true }, panelPosition: null };
 
   function readSettings() {
     try {
@@ -120,7 +120,7 @@
       <section class="panel" aria-label="TikTok LIVE Companion" hidden>
         <header><h2>TikTok LIVE Companion</h2><button class="close" type="button" aria-label="Close">×</button></header>
         <div class="modules"></div>
-        <div class="roadmap">Next: chat, gifts, viewer activity, LIVE stats, player controls, and shortcuts.</div>
+        <div class="roadmap">Next: chat, viewer activity, LIVE stats, player controls, and shortcuts.</div>
       </section>`;
 
     const launcher = shadow.querySelector('.launcher');
@@ -6169,5 +6169,480 @@ function findGroups(
         }
     });
 
+})();
+
+/* ---- src/gift-tracker.logic.js ---- */
+(() => {
+  'use strict';
+
+  const sid = (value) => value == null || value === '' ? null : String(value);
+  const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  const masked = (value) => /^enigma(?:\s|_|-|$)/i.test(String(value || '').trim());
+  const flag = (value) => value === true || value === 1 || value === '1' || value === 'true';
+
+  function payloadOf(args) {
+    let value = Array.isArray(args) ? args[0] : args;
+    if (value?.payload && Array.isArray(value.payload)) value = value.payload[0];
+    if (value?.data && value.data.gift && !value.gift) value = value.data;
+    return value && typeof value === 'object' ? value : {};
+  }
+
+  function userOf(value) {
+    return value.user || value.from_user || value.fromUser || value.sender || value.user_info || value.userInfo || null;
+  }
+
+  function identityOf(user) {
+    if (!user || typeof user !== 'object') return null;
+    const nickname = sid(user.nickname ?? user.nick_name ?? user.display_name ?? user.displayName);
+    const username = sid(user.unique_id ?? user.uniqueId ?? user.display_id ?? user.displayId);
+    const userId = sid(user.id_str ?? user.id ?? user.user_id_str ?? user.user_id ?? user.userId);
+    const secUid = sid(user.sec_uid ?? user.secUid);
+    return { nickname, username, userId, secUid, key: secUid || userId || null };
+  }
+
+  function findEvent(value, wantedGift, depth = 0, seen = new WeakSet()) {
+    if (!value || typeof value !== 'object' || depth > 5 || seen.has(value)) return null;
+    seen.add(value);
+    const method = String(value.method ?? value.message_type ?? value.messageType ?? value.event ?? value.type ?? '');
+    const hasGift = !!(value.gift || value.gift_info || value.giftInfo || value.gift_detail || value.giftDetail ||
+      value.extended_gift_info || value.extendedGiftInfo || value.gift_name || value.giftName);
+    if (wantedGift ? hasGift : userOf(value)) return value;
+    for (const key of Object.keys(value).slice(0, 45)) {
+      if (/buffer|binary|raw|header|cookie|token|signature/i.test(key)) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const child = descriptor && 'value' in descriptor ? descriptor.value : null;
+      if (!child || typeof child !== 'object') continue;
+      if (Array.isArray(child)) {
+        for (const item of child.slice(0, 20)) {
+          const found = findEvent(item, wantedGift, depth + 1, seen);
+          if (found) return found;
+        }
+      } else {
+        const found = findEvent(child, wantedGift, depth + 1, seen);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  function extractGift(eventName, args) {
+    const root = payloadOf(args);
+    const value = findEvent(root, true) || (/gift/i.test(String(eventName)) ? root : null);
+    if (!value) return null;
+    const gift = value.gift || value.gift_info || value.giftInfo || value.gift_detail || value.giftDetail ||
+      value.extended_gift_info || value.extendedGiftInfo || {};
+    const giftName = sid(gift.name ?? gift.gift_name ?? gift.giftName ?? value.gift_name ?? value.giftName);
+    const giftId = sid(gift.id ?? gift.gift_id ?? gift.giftId ?? value.gift_id ?? value.giftId);
+    if (!giftName && !giftId) return null;
+    const user = userOf(value);
+    const identity = identityOf(user);
+    if (!identity) return null;
+    const repeatCount = Math.max(1, number(value.repeat_count ?? value.repeatCount ?? value.combo_count ?? value.comboCount, 1));
+    const repeatEndValue = value.repeat_end ?? value.repeatEnd ?? value.combo_end ?? value.comboEnd;
+    const streakingValue = value.streaking ?? value.is_streaking ?? value.isStreaking;
+    const streakable = Boolean(gift.streakable ?? gift.is_streakable ?? gift.isStreakable ?? Number(gift.type) === 1);
+    const final = repeatEndValue != null ? flag(repeatEndValue) : streakingValue != null ? !flag(streakingValue) : true;
+    const perUnitDiamonds = Math.max(0, number(gift.diamond_count ?? gift.diamondCount ?? value.diamond_count ?? value.diamondCount));
+    const anonymous = flag(value.is_anonymous ?? value.isAnonymous ?? user?.is_anonymous ?? user?.isAnonymous) || masked(identity.nickname);
+    const recipientIdentity = identityOf(value.to_user ?? value.toUser ?? value.receiver ?? value.receiver_user ?? value.receiverUser);
+    const recipient = recipientIdentity?.nickname || recipientIdentity?.username || sid(value.to_user_id ?? value.toUserId ??
+      value.to_member_id ?? value.toMemberId ?? value.anchor_id ?? value.anchorId);
+    const messageId = sid(value.transaction_id ?? value.transactionId ?? value.log_id ?? value.logId ??
+      value.common?.msg_id ?? value.common?.message_id ?? value.common?.log_id);
+    const createdAt = sid(value.create_time ?? value.createTime ?? value.common?.create_time ?? value.common?.createTime);
+    return { raw: value, giftName: giftName || `Gift ${giftId}`, giftId, identity, repeatCount,
+      streakable, final, perUnitDiamonds, anonymous, recipient, messageId, createdAt };
+  }
+
+  function create() {
+    return { gifts: [], gifters: new Map(), identities: new Map(), pending: new Map(), signatures: new Map(),
+      seenObjects: new WeakSet(), totalDiamonds: 0, totalGifts: 0, duplicates: 0 };
+  }
+
+  function learnIdentity(state, identity) {
+    if (!identity?.key || !identity.username || masked(identity.username)) return false;
+    const previous = state.identities.get(identity.key);
+    state.identities.set(identity.key, identity.username);
+    if (previous === identity.username) return false;
+    let changed = false;
+    for (const gift of state.gifts) {
+      if (gift.identityKey === identity.key && !gift.username) {
+        gift.username = identity.username;
+        gift.resolution = 'matched-stable-id';
+        changed = true;
+      }
+    }
+    const gifter = state.gifters.get(identity.key);
+    if (gifter && !gifter.username) {
+      gifter.username = identity.username;
+      changed = true;
+    }
+    return changed;
+  }
+
+  function observeIdentity(state, args) {
+    const value = findEvent(payloadOf(args), false);
+    return learnIdentity(state, identityOf(value && userOf(value)));
+  }
+
+  function pruneSignatures(state, now) {
+    if (state.signatures.size < 400) return;
+    for (const [key, at] of state.signatures) if (now - at > 120000) state.signatures.delete(key);
+  }
+
+  function consume(state, eventName, args, now = Date.now()) {
+    observeIdentity(state, args);
+    const parsed = extractGift(eventName, args);
+    if (!parsed) return { type: 'ignored' };
+    if (parsed.raw && typeof parsed.raw === 'object') {
+      if (state.seenObjects.has(parsed.raw)) { state.duplicates++; return { type: 'duplicate' }; }
+      state.seenObjects.add(parsed.raw);
+    }
+    learnIdentity(state, parsed.identity);
+    const signatureBase = parsed.messageId || [parsed.giftId, parsed.identity.key, parsed.identity.username,
+      parsed.repeatCount, parsed.createdAt || Math.floor(now / 1500)].join('|');
+    const signature = `${signatureBase}|${parsed.repeatCount}|${parsed.final ? 'final' : 'streak'}`;
+    if (state.signatures.has(signature)) { state.duplicates++; return { type: 'duplicate' }; }
+    state.signatures.set(signature, now);
+    pruneSignatures(state, now);
+
+    const realUsername = parsed.identity.username && !masked(parsed.identity.username) ? parsed.identity.username :
+      parsed.identity.key ? state.identities.get(parsed.identity.key) || null : null;
+    const displayName = parsed.anonymous ? parsed.identity.nickname || 'Enigma' :
+      parsed.identity.nickname || realUsername || 'Unknown gifter';
+    const resolution = !parsed.anonymous ? 'visible' : realUsername ? 'event-identifier' :
+      parsed.identity.key ? 'stable-id-only' : 'unavailable';
+    const pendingKey = parsed.messageId || [parsed.identity.key || parsed.identity.username || displayName,
+      parsed.giftId || parsed.giftName].join('|');
+    const row = { id: `${pendingKey}|${now}`, pendingKey, at: now, displayName, username: realUsername,
+      anonymous: parsed.anonymous, resolution, identityKey: parsed.identity.key, giftName: parsed.giftName,
+      giftId: parsed.giftId, repeatCount: parsed.repeatCount, diamonds: parsed.perUnitDiamonds * parsed.repeatCount,
+      recipient: parsed.recipient || null, final: parsed.final };
+
+    if (parsed.streakable && !parsed.final) {
+      const previous = state.pending.get(pendingKey);
+      if (previous) {
+        const index = state.gifts.indexOf(previous);
+        if (index >= 0) state.gifts[index] = row;
+      } else {
+        state.gifts.unshift(row);
+      }
+      state.pending.set(pendingKey, row);
+      state.gifts = state.gifts.slice(0, 50);
+      return { type: 'streak', gift: row };
+    }
+
+    const preview = state.pending.get(pendingKey);
+    if (preview) {
+      const index = state.gifts.indexOf(preview);
+      if (index >= 0) state.gifts.splice(index, 1);
+      state.pending.delete(pendingKey);
+    }
+    state.gifts.unshift(row);
+    state.gifts = state.gifts.slice(0, 50);
+    state.totalGifts += parsed.repeatCount;
+    state.totalDiamonds += row.diamonds;
+    const gifterKey = parsed.identity.key || realUsername || displayName;
+    const gifter = state.gifters.get(gifterKey) || { key: gifterKey, displayName, username: realUsername,
+      anonymous: parsed.anonymous, diamonds: 0, gifts: 0 };
+    gifter.displayName = displayName;
+    gifter.username ||= realUsername;
+    gifter.diamonds += row.diamonds;
+    gifter.gifts += parsed.repeatCount;
+    state.gifters.set(gifterKey, gifter);
+    return { type: 'gift', gift: row };
+  }
+
+  function topGifters(state, limit = 5) {
+    return [...state.gifters.values()].sort((a, b) => b.diamonds - a.diamonds || b.gifts - a.gifts).slice(0, limit);
+  }
+
+  window.__TTLC_GIFT_LOGIC__ = Object.freeze({ create, consume, extractGift, observeIdentity, topGifters, masked });
+})();
+
+/* ---- src/modules/gift-tracker.module.js ---- */
+(() => {
+  'use strict';
+
+  const MODULE_ID = 'gift-tracker';
+  const HOST_ID = 'ttlc-gift-tracker-host';
+  const POSITION_KEY = 'ttlc.giftTracker.position.v1';
+  const logic = window.__TTLC_GIFT_LOGIC__;
+  if (!logic) return;
+
+  let enabled = window.__TTLC__?.isEnabled(MODULE_ID) !== false;
+  let state = logic.create();
+  let host = null;
+  let shadow = null;
+  let scanTimer = null;
+  let renderTimer = null;
+  let scanStatus = 'Waiting for LIVE page';
+  const listeners = [];
+  let buses = new WeakSet();
+
+  function reactKey(node) {
+    return node && Object.getOwnPropertyNames(node).find((key) =>
+      key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$'));
+  }
+
+  function committedRoot() {
+    const videos = [...document.querySelectorAll('video')].sort((a, b) => {
+      const ar = a.getBoundingClientRect(), br = b.getBoundingClientRect();
+      return br.width * br.height - ar.width * ar.height;
+    });
+    for (const video of videos) {
+      let node = video;
+      for (let depth = 0; node && depth < 35; depth++, node = node.parentElement) {
+        const key = reactKey(node);
+        let fiber = key ? node[key] : null;
+        if (!fiber) continue;
+        while (fiber.return) fiber = fiber.return;
+        return fiber?.stateNode?.current || fiber;
+      }
+    }
+    return null;
+  }
+
+  function allFibers(root) {
+    const out = [], stack = [root], seen = new Set();
+    while (stack.length && out.length < 18000) {
+      const fiber = stack.pop();
+      if (!fiber || typeof fiber !== 'object' || seen.has(fiber)) continue;
+      seen.add(fiber); out.push(fiber);
+      if (fiber.sibling) stack.push(fiber.sibling);
+      if (fiber.child) stack.push(fiber.child);
+    }
+    return out;
+  }
+
+  function eventNames(bus) {
+    const names = new Set(['Gift', 'GiftMessage', 'WebcastGift', 'WebcastGiftMessage', 'message',
+      'Chat', 'Comment', 'WebcastChatMessage', 'Member', 'WebcastMemberMessage', 'Follow', 'WebcastSocialMessage']);
+    try {
+      if (typeof bus.eventNames === 'function') for (const name of bus.eventNames()) names.add(String(name));
+      for (const key of Object.keys(bus).slice(0, 100)) {
+        if (!/event|listen|handler|callback|message/i.test(key)) continue;
+        const registry = bus[key];
+        if (registry instanceof Map) for (const name of registry.keys()) names.add(String(name));
+        else if (registry && typeof registry === 'object') for (const name of Object.keys(registry)) names.add(name);
+      }
+    } catch (_) {}
+    return [...names].filter((name) => /gift|chat|comment|member|join|follow|social|^message$/i.test(name)).slice(0, 60);
+  }
+
+  function receive(eventName, args) {
+    if (!enabled) return;
+    const result = logic.consume(state, eventName, args);
+    if (result.type !== 'ignored' && result.type !== 'duplicate') scheduleRender();
+  }
+
+  function subscribe(bus) {
+    if (!bus || typeof bus.on !== 'function' || typeof bus.off !== 'function' || buses.has(bus)) return;
+    const added = [];
+    for (const name of eventNames(bus)) {
+      const listener = (...args) => receive(name, args);
+      try { bus.on(name, listener); listeners.push({ bus, name, listener }); added.push(name); } catch (_) {}
+    }
+    if (added.length) {
+      buses.add(bus);
+      scanStatus = `Listening for gifts (${busesCount()} source${busesCount() === 1 ? '' : 's'})`;
+      scheduleRender();
+    }
+  }
+
+  function busesCount() {
+    return new Set(listeners.map((item) => item.bus)).size;
+  }
+
+  function scan() {
+    if (!enabled || document.hidden || !/\/@[^/]+\/live\/?$/.test(location.pathname)) {
+      scanStatus = enabled ? 'Open a TikTok LIVE room' : 'Off';
+      scheduleRender();
+      return;
+    }
+    const root = committedRoot();
+    if (!root) { scanStatus = 'Waiting for LIVE player'; scheduleRender(); return; }
+    const seen = new WeakSet();
+    let visited = 0;
+    function walk(value, depth) {
+      if (!value || typeof value !== 'object' || seen.has(value) || depth > 8 || visited++ > 35000) return;
+      seen.add(value);
+      try {
+        if (value._messageEvents && typeof value._messageEvents.on === 'function') subscribe(value._messageEvents);
+        if (value._config && typeof value.on === 'function' && typeof value.off === 'function') subscribe(value);
+        for (const key of Object.keys(value).slice(0, 100)) {
+          if (['return', 'alternate', 'child', 'sibling', 'stateNode', 'window', 'document'].includes(key)) continue;
+          const descriptor = Object.getOwnPropertyDescriptor(value, key);
+          if (descriptor && 'value' in descriptor && descriptor.value && typeof descriptor.value === 'object')
+            walk(descriptor.value, depth + 1);
+        }
+      } catch (_) {}
+    }
+    for (const fiber of allFibers(root)) {
+      walk(fiber.updateQueue, 0);
+      walk(fiber.memoizedProps, 0);
+      walk(fiber.memoizedState, 0);
+      if (visited > 35000) break;
+    }
+    if (!busesCount()) scanStatus = 'Finding TikTok gift events…';
+    scheduleRender();
+  }
+
+  function stopListeners() {
+    for (const { bus, name, listener } of listeners.splice(0)) {
+      try { bus.off(name, listener); } catch (_) {}
+    }
+    buses = new WeakSet();
+  }
+
+  function readPosition() {
+    try { return JSON.parse(localStorage.getItem(POSITION_KEY) || 'null'); } catch (_) { return null; }
+  }
+
+  function mount() {
+    if (!enabled || host || !document.documentElement) return;
+    host = document.createElement('div');
+    host.id = HOST_ID;
+    document.documentElement.append(host);
+    shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `
+      <style>
+        :host { all: initial; }
+        .panel { position: fixed; left: 18px; top: 88px; z-index: 2147483646; width: 330px; color: #f8f5fb;
+          background: #15111c; border: 1px solid #70459e; border-radius: 12px; box-shadow: 0 12px 34px #000a;
+          overflow: hidden; font: 12px/1.35 system-ui, sans-serif; }
+        header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #21172c; cursor: move;
+          user-select: none; touch-action: none; }
+        h3 { flex: 1; margin: 0; font-size: 13px; } button { border: 0; border-radius: 6px; padding: 4px 7px;
+          color: #ddd; background: #342641; cursor: pointer; } .body { padding: 10px; }
+        .status { color: #b992e4; font-size: 11px; margin-bottom: 8px; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; }
+        .stat { padding: 7px; text-align: center; border-radius: 7px; background: #241b2d; }
+        .value { display: block; color: #fff; font-weight: 700; font-size: 14px; }
+        .label { color: #938b9a; font-size: 10px; } .section { margin: 8px 0 4px; color: #aaa; font-size: 10px;
+          letter-spacing: .05em; text-transform: uppercase; }
+        .list { max-height: 190px; overflow: auto; } .row { padding: 6px 4px; border-top: 1px solid #2b2234; }
+        .line { display: flex; justify-content: space-between; gap: 8px; } .sender { color: #dfc3ff; font-weight: 650; }
+        .gift { color: #65e2e8; } .meta, .empty { color: #8f8795; font-size: 10px; }
+        .resolved { color: #72e59a; } .unknown { color: #ffbd66; } .top { display: grid; grid-template-columns: 1fr auto;
+          gap: 4px 8px; padding: 4px; } [hidden] { display: none !important; }
+      </style>
+      <section class="panel">
+        <header><h3>🎁 LIVE Gift Tracker</h3><button class="clear" type="button">Clear</button><button class="collapse" type="button">−</button></header>
+        <div class="body"><div class="status"></div><div class="stats"></div>
+          <div class="section">Top gifters this session</div><div class="leaders"></div>
+          <div class="section">Recent gifts</div><div class="list"></div></div>
+      </section>`;
+    const panel = shadow.querySelector('.panel');
+    const saved = readPosition();
+    if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+      panel.style.left = `${Math.max(0, Math.min(innerWidth - 330, saved.left))}px`;
+      panel.style.top = `${Math.max(0, Math.min(innerHeight - 50, saved.top))}px`;
+    }
+    let drag = null;
+    const header = shadow.querySelector('header');
+    header.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || event.target.closest('button')) return;
+      const rect = panel.getBoundingClientRect();
+      drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      header.setPointerCapture(event.pointerId); event.preventDefault();
+    });
+    header.addEventListener('pointermove', (event) => {
+      if (!drag) return;
+      panel.style.left = `${Math.max(0, Math.min(innerWidth - panel.offsetWidth, drag.left + event.clientX - drag.x))}px`;
+      panel.style.top = `${Math.max(0, Math.min(innerHeight - panel.offsetHeight, drag.top + event.clientY - drag.y))}px`;
+    });
+    const finishDrag = () => {
+      if (!drag) return;
+      drag = null;
+      const rect = panel.getBoundingClientRect();
+      localStorage.setItem(POSITION_KEY, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) }));
+    };
+    header.addEventListener('pointerup', finishDrag);
+    header.addEventListener('pointercancel', finishDrag);
+    shadow.querySelector('.collapse').addEventListener('click', (event) => {
+      const body = shadow.querySelector('.body');
+      body.hidden = !body.hidden;
+      event.currentTarget.textContent = body.hidden ? '+' : '−';
+    });
+    shadow.querySelector('.clear').addEventListener('click', () => { state = logic.create(); render(); });
+    render();
+  }
+
+  function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function render() {
+    if (!shadow) return;
+    shadow.querySelector('.status').textContent = scanStatus;
+    const stats = shadow.querySelector('.stats');
+    stats.replaceChildren(...[
+      [state.totalGifts, 'Gifts'], [state.totalDiamonds, 'Diamonds'], [state.gifters.size, 'Gifters']
+    ].map(([value, label]) => {
+      const box = element('div', 'stat');
+      box.append(element('span', 'value', Number(value).toLocaleString()), element('span', 'label', label));
+      return box;
+    }));
+    const leaders = shadow.querySelector('.leaders');
+    const top = logic.topGifters(state, 5);
+    leaders.replaceChildren(...(top.length ? top.map((gifter, index) => {
+      const row = element('div', 'top');
+      row.append(element('span', '', `${index + 1}. ${gifter.username ? '@' + gifter.username : gifter.displayName}`),
+        element('span', '', `${gifter.diamonds.toLocaleString()} 💎`));
+      return row;
+    }) : [element('div', 'empty', 'No completed gifts yet.')]))
+    const list = shadow.querySelector('.list');
+    list.replaceChildren(...(state.gifts.length ? state.gifts.map((gift) => {
+      const row = element('div', 'row');
+      const line = element('div', 'line');
+      const senderText = gift.username ? `@${gift.username}` : gift.displayName;
+      line.append(element('span', 'sender', senderText),
+        element('span', 'gift', `${gift.giftName} ×${gift.repeatCount}`));
+      row.append(line);
+      const details = [];
+      if (gift.diamonds) details.push(`${gift.diamonds.toLocaleString()} 💎`);
+      if (gift.recipient) details.push(`to ${gift.recipient}`);
+      if (!gift.final) details.push('streaking…');
+      if (gift.anonymous) details.push(gift.username ? 'Enigma resolved from event ID' :
+        gift.resolution === 'stable-id-only' ? 'Enigma: stable ID only' : 'Enigma: identity unavailable');
+      row.append(element('div', `meta ${gift.anonymous ? gift.username ? 'resolved' : 'unknown' : ''}`, details.join(' · ')));
+      return row;
+    }) : [element('div', 'empty', 'Waiting for gifts…')]))
+  }
+
+  function scheduleRender() {
+    if (renderTimer) return;
+    renderTimer = setTimeout(() => { renderTimer = null; render(); }, 100);
+  }
+
+  function start() {
+    enabled = true;
+    mount();
+    scan();
+    if (!scanTimer) scanTimer = setInterval(scan, 4000);
+  }
+
+  function stop() {
+    enabled = false;
+    clearInterval(scanTimer); scanTimer = null;
+    clearTimeout(renderTimer); renderTimer = null;
+    stopListeners();
+    host?.remove(); host = shadow = null;
+  }
+
+  window.addEventListener('pagehide', stopListeners);
+  document.addEventListener('visibilitychange', () => { if (enabled && !document.hidden) scan(); });
+  window.__TTLC__?.register({
+    id: MODULE_ID,
+    name: 'Gift Tracker',
+    description: 'Shows recent gifts, diamonds, top gifters, recipients, and evidence-based Enigma identity.',
+    start,
+    stop,
+    status() { return enabled ? scanStatus : 'Off'; }
+  });
 })();
 
