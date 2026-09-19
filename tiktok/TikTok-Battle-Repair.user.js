@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok 1V1 + 2V2 AUTO Native Cohost Repair v2.6.7
 // @namespace    https://www.tiktok.com/
-// @version      2.6.9
+// @version      2.6.10
 // @description  Restores native cohost names and 1v1/2v2 battle overlays with guarded automatic monitoring.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -660,7 +660,7 @@
             capturedAt:
                 new Date().toISOString(),
 
-            version: '2.6.9',
+            version: '2.6.10',
 
             page:
                 location.href
@@ -670,7 +670,7 @@
     // Read-only diagnostics: never substitute a different room's module.
     function captureNativeState() {
         const result = { capturedAt: new Date().toISOString(), page: location.href,
-            version: '2.6.9', dom: domState(), modules: [], partialModules: [] };
+            version: '2.6.10', dom: domState(), modules: [], partialModules: [] };
         try {
             const root = committedRoot();
             if (!root) return { ...result, discovery: 'NO_REACT_ROOT' };
@@ -680,6 +680,13 @@
             result.current = current ? { roomId: current.roomId, anchorId: current.anchorId,
                 battleId: getBattleId(current.battle), channelId: getChannelId(current.battle),
                 status: current.status, path: current.path,
+                battle: current.battle ? {
+                    action: current.battle.action ?? null,
+                    status: current.battle.status ?? current.battle.battle_status ?? null,
+                    type: current.battle.battle_type ?? current.battle.battle_settings?.battle_type ?? null,
+                    anchorCount: current.battle.anchors_info?.length ?? null,
+                    teamCount: current.battle.team_member?.length ?? null
+                } : null,
                 users: current.users?.map(summarizeUser) } : null;
             result.controller = controller ? { objectId: oid(controller.fiber),
                 shown: [...controller.shown], moduleRefKeys: Object.keys(controller.refs.Cohost) } : null;
@@ -1787,7 +1794,7 @@
     }
 
 
-    // v2.6.9: controller.shown can change before React unmounts the Cohost child.
+    // v2.6.10: controller.shown can change before React unmounts the Cohost child.
     // Wait for both signals so useState/useMemo closures are recreated from corrected data.
     async function waitForCohostRemoved(controller, timeoutMs = 2200) {
         const started = Date.now();
@@ -1854,7 +1861,7 @@
     }
 
 
-    // v2.6.9: a fast DOM removal can precede full React effect cleanup. Keep the
+    // v2.6.10: a fast DOM removal can precede full React effect cleanup. Keep the
     // destroy-to-init boundary near 500ms, matching the live-proven successful case.
     async function remountCohost(controller, moduleData, current, battle, armies, sei, report, phase) {
         controller.destroyFn('Cohost');
@@ -2090,7 +2097,7 @@
     }
 
 
-    // v2.6.9: isolated 2v2 observer plus guarded automatic repair. The established
+    // v2.6.10: isolated 2v2 observer plus guarded automatic repair. The established
     // 1v1 observers and repair functions remain unchanged.
     const twoVTwo = { page: null, roomId: null, battle: null, battleAt: 0,
         armies: null, armiesAt: 0, sei: null, seiAt: 0, groupChannelId: null,
@@ -2248,6 +2255,35 @@
             teamId: sid(team?.team_id),
             userIds: (team?.user_id ?? []).map(sid)
         }));
+    }
+
+    function summarizeTwoVTwoCapture() {
+        const now = Date.now();
+        const app = twoVTwo.sei?.seiContent?.app_data;
+        return {
+            roomId: twoVTwo.roomId,
+            battle: twoVTwo.battle ? {
+                ageMs: now - twoVTwo.battleAt,
+                battleId: opponentBattleId(twoVTwo.battle),
+                channelId: sid(twoVTwo.battle?.battle_settings?.channel_id ?? twoVTwo.battle?.channel_id),
+                anchorCount: twoVTwo.battle?.anchors_info?.length ?? null,
+                teams: summarizeTwoVTwoTeams(twoVTwo.battle)
+            } : null,
+            armies: twoVTwo.armies ? {
+                ageMs: now - twoVTwo.armiesAt,
+                battleId: opponentBattleId(twoVTwo.armies),
+                channelId: sid(twoVTwo.armies?.battle_settings?.channel_id ?? twoVTwo.armies?.channel_id),
+                battleType: twoVTwo.armies?.battle_settings?.battle_type ?? null,
+                teamSizes: twoVTwo.armies?.team_armies?.map(team => team?.team_user?.length ?? null) ?? null
+            } : null,
+            sei: twoVTwo.sei ? {
+                ageMs: now - twoVTwo.seiAt,
+                roomChannelId: sid(app?.channel_id),
+                groupChannelId: sid(app?.group_channel_id),
+                gridCount: app?.grids?.length ?? null
+            } : null,
+            listenerCount: twoVTwo.listeners.length
+        };
     }
 
     function findNamedTwoVTwoUsers(data, userIds) {
@@ -2485,9 +2521,32 @@
             if (beforeComplete) throw new Error('The 2v2 interface is already complete');
             const needsLayoutRebuild = !before.battleRoot && !discovery.controller.shown.includes('Cohost');
             let battle = twoVTwo.battle;
-            const armies = twoVTwo.armies;
-            const sei = twoVTwo.sei;
-            const app = sei?.seiContent?.app_data;
+            let armies, sei, app;
+            const captureStarted = Date.now();
+            const captureLimit = options.automatic ? 0 : 6000;
+            while (true) {
+                observeTwoVTwo();
+                armies = twoVTwo.armies;
+                sei = twoVTwo.sei;
+                app = sei?.seiContent?.app_data;
+                const armyChannel = sid(armies?.battle_settings?.channel_id ?? armies?.channel_id);
+                const validArmies = armies && Date.now() - twoVTwo.armiesAt <= 8000 &&
+                    Number(armies?.battle_settings?.battle_type) === 2 &&
+                    Array.isArray(armies.team_armies) && armies.team_armies.length === 2 &&
+                    armies.team_armies.every(team =>
+                        Array.isArray(team?.team_user) && team.team_user.length === 2);
+                const validSEI = sei && Date.now() - twoVTwo.seiAt <= 8000 && app?.ver === 2 &&
+                    sid(app.channel_id) === discovery.current.roomId &&
+                    sid(app.group_channel_id) === armyChannel &&
+                    Array.isArray(app.grids) && app.grids.length === 4;
+                if (validArmies && validSEI) break;
+                if (Date.now() - captureStarted >= captureLimit) break;
+                report.stage = 'WAITING_FOR_CURRENT_2V2_DATA';
+                updateStatus('WAITING FOR LIVE 2V2 DATA', '#b48cff');
+                await sleep(250);
+            }
+            report.captureWaitMs = Date.now() - captureStarted;
+            report.observer = summarizeTwoVTwoCapture();
             if (!armies || Date.now() - twoVTwo.armiesAt > 8000 ||
                 Number(armies?.battle_settings?.battle_type) !== 2 ||
                 !Array.isArray(armies.team_armies) || armies.team_armies.length !== 2 ||
@@ -3024,7 +3083,7 @@
 
     function diagnoseBattle() {
         const previousRepair = lastReport;
-        lastReport = { ...makeReportBase(), version: '2.6.9', mode: 'READ_ONLY_DIAGNOSTIC',
+        lastReport = { ...makeReportBase(), version: '2.6.10', mode: 'READ_ONLY_DIAGNOSTIC',
             nativeState: captureNativeState(), previousRepair };
         showReport();
     }
@@ -4348,7 +4407,7 @@ function findGroups(
     }
 
 
-    // v2.6.9 watcher: the full-unmount + native replay path is now live-proven.
+    // v2.6.10 watcher: the full-unmount + native replay path is now live-proven.
     // It handles missing-name/zero-score states automatically and can use the
     // proven room-SEI bootstrap when the entire Cohost layout is absent.
     async function automaticTick() {
@@ -5560,7 +5619,7 @@ function findGroups(
             delete child.dataset.expandedDisplay;
         }
         if (head) {
-            head.textContent = 'TikTok Battle Repair · 2.6.9';
+            head.textContent = 'TikTok Battle Repair · 2.6.10';
             head.title = '';
             Object.assign(head.style, { width: 'auto', height: 'auto', display: 'block',
                 alignItems: '', justifyContent: '', padding: '4px', borderRadius: '0' });
@@ -5604,7 +5663,7 @@ function findGroups(
             background: '#101010', color: '#fff', border: '1px solid #b48cff',
             borderRadius: '5px', padding: '5px', boxSizing: 'border-box', font: '11px Arial' });
         const head = document.createElement('div');
-        head.textContent = 'TikTok Battle Repair · 2.6.9';
+        head.textContent = 'TikTok Battle Repair · 2.6.10';
         Object.assign(head.style, { cursor: 'move', textAlign: 'center', padding: '4px', color: '#b48cff' });
         head.addEventListener('click', () => {
             if (panel.dataset.collapsed === 'true' && panel.dataset.justDragged !== 'true') expandPanel();
