@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.3.1
-// @description  Modular TikTok LIVE Battle/PK repair and evidence-based gift tracking tools.
+// @version      0.4.0
+// @description  Modular TikTok LIVE Battle/PK repair with persistent per-session gift tracking.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
 // @grant        none
@@ -382,7 +382,7 @@
     const POS_KEY = 'tt_1v1_auto_repair_v20_pos';
 
     let hidden = false;
-    let collapsed = false;
+    let collapsed = true;
     let lastReport = null;
     let running = false;
     let moduleEnabled = window.__TTLC__?.isEnabled('battle-pk') !== false;
@@ -6081,6 +6081,7 @@ function findGroups(
         row.append(record);
         row.append(run, uiButton('Test 3/4 cohost names', repairGroupCohostNames, '#006b72'), uiButton('Test 2v2 missing layout', repairMissingTwoVTwo, '#006b72'), uiButton('Test 1v1 missing layout', repairMissingLayout, '#7a4a00'), uiButton('Test 1v1 cohost name', repairCohostName, '#7a4a00'), uiButton('Test 1v1 opponent restart', repairOpponentByRemount, '#7a4a00'), uiButton('View report', showReport), toggle, uiButton('Collapse panel', hidePanel));
         panel.append(head, status, detail, monitoring, row); document.body.append(panel); makeDraggable(panel, head);
+        if (collapsed) hidePanel();
         refreshPanelStatus();
     }
 
@@ -6259,6 +6260,35 @@ function findGroups(
       seenObjects: new WeakSet(), totalDiamonds: 0, totalGifts: 0, duplicates: 0 };
   }
 
+  function serialize(state) {
+    return {
+      schema: 1,
+      gifts: state.gifts,
+      gifters: [...state.gifters.entries()],
+      identities: [...state.identities.entries()],
+      signatures: [...state.signatures.entries()].slice(-600),
+      totalDiamonds: state.totalDiamonds,
+      totalGifts: state.totalGifts,
+      duplicates: state.duplicates
+    };
+  }
+
+  function restore(saved) {
+    const state = create();
+    if (!saved || typeof saved !== 'object') return state;
+    state.gifts = Array.isArray(saved.gifts) ? saved.gifts.filter((gift) => gift && typeof gift === 'object') : [];
+    state.gifters = new Map(Array.isArray(saved.gifters) ? saved.gifters : []);
+    state.identities = new Map(Array.isArray(saved.identities) ? saved.identities : []);
+    state.signatures = new Map(Array.isArray(saved.signatures) ? saved.signatures : []);
+    state.totalDiamonds = Math.max(0, number(saved.totalDiamonds));
+    state.totalGifts = Math.max(0, number(saved.totalGifts));
+    state.duplicates = Math.max(0, number(saved.duplicates));
+    for (const gift of state.gifts) {
+      if (!gift.final && gift.pendingKey) state.pending.set(gift.pendingKey, gift);
+    }
+    return state;
+  }
+
   function learnIdentity(state, identity) {
     if (!identity?.key || !identity.username || masked(identity.username)) return false;
     const previous = state.identities.get(identity.key);
@@ -6328,7 +6358,6 @@ function findGroups(
         state.gifts.unshift(row);
       }
       state.pending.set(pendingKey, row);
-      state.gifts = state.gifts.slice(0, 50);
       return { type: 'streak', gift: row };
     }
 
@@ -6339,7 +6368,6 @@ function findGroups(
       state.pending.delete(pendingKey);
     }
     state.gifts.unshift(row);
-    state.gifts = state.gifts.slice(0, 50);
     state.totalGifts += parsed.repeatCount;
     state.totalDiamonds += row.diamonds;
     const gifterKey = parsed.identity.key || realUsername || displayName;
@@ -6357,7 +6385,8 @@ function findGroups(
     return [...state.gifters.values()].sort((a, b) => b.diamonds - a.diamonds || b.gifts - a.gifts).slice(0, limit);
   }
 
-  window.__TTLC_GIFT_LOGIC__ = Object.freeze({ create, consume, extractGift, observeIdentity, topGifters, masked });
+  window.__TTLC_GIFT_LOGIC__ = Object.freeze({ create, serialize, restore, consume, extractGift,
+    observeIdentity, topGifters, masked });
 })();
 
 /* ---- src/modules/gift-tracker.module.js ---- */
@@ -6367,6 +6396,7 @@ function findGroups(
   const MODULE_ID = 'gift-tracker';
   const HOST_ID = 'ttlc-gift-tracker-host';
   const POSITION_KEY = 'ttlc.giftTracker.position.v1';
+  const SESSIONS_KEY = 'ttlc.giftTracker.sessions.v1';
   const logic = window.__TTLC_GIFT_LOGIC__;
   if (!logic) return;
 
@@ -6378,8 +6408,76 @@ function findGroups(
   let renderTimer = null;
   let scanStatus = 'Waiting for LIVE page';
   let scanPage = null;
+  let currentCreator = null;
+  let currentRoomId = null;
+  let saveTimer = null;
+  let storageWarning = null;
   const listeners = [];
   let buses = new WeakSet();
+
+  function creatorFromPath() {
+    const match = location.pathname.match(/^\/@([^/]+)\/live\/?$/);
+    return match ? decodeURIComponent(match[1]).toLowerCase() : null;
+  }
+
+  function readSessions() {
+    try {
+      const value = JSON.parse(localStorage.getItem(SESSIONS_KEY) || '{}');
+      return value && typeof value === 'object' ? value : {};
+    } catch (_) { return {}; }
+  }
+
+  function persistSession() {
+    clearTimeout(saveTimer); saveTimer = null;
+    if (!currentCreator) return;
+    try {
+      const sessions = readSessions();
+      sessions[currentCreator] = { creator: currentCreator, roomId: currentRoomId,
+        savedAt: Date.now(), state: logic.serialize(state) };
+      const recent = Object.entries(sessions).sort((a, b) => Number(b[1]?.savedAt) - Number(a[1]?.savedAt)).slice(0, 20);
+      localStorage.setItem(SESSIONS_KEY, JSON.stringify(Object.fromEntries(recent)));
+      storageWarning = null;
+    } catch (_) {
+      storageWarning = 'Session storage is full; newest history may not survive refresh.';
+    }
+  }
+
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(persistSession, 250);
+  }
+
+  function loadCreator(creator) {
+    currentCreator = creator;
+    const saved = creator ? readSessions()[creator] : null;
+    currentRoomId = saved?.roomId || null;
+    state = saved?.state ? logic.restore(saved.state) : logic.create();
+  }
+
+  function syncCreator() {
+    const creator = creatorFromPath();
+    if (creator === currentCreator) return;
+    persistSession();
+    stopListeners();
+    loadCreator(creator);
+    scheduleRender();
+  }
+
+  function roomIdOf(value) {
+    const id = value?._config?.roomId ?? value?._config?.room_id ?? value?._messageEvents?.roomId ??
+      value?._messageEvents?.room_id ?? value?._socket?.socketProps?.roomId ?? value?._socket?.socketProps?.room_id;
+    return id == null || id === '' ? null : String(id);
+  }
+
+  function useRoom(roomId) {
+    if (!roomId) return;
+    if (currentRoomId && currentRoomId !== roomId) state = logic.create();
+    if (currentRoomId !== roomId) {
+      currentRoomId = roomId;
+      scheduleSave();
+      scheduleRender();
+    }
+  }
 
   function reactKey(node) {
     return node && Object.getOwnPropertyNames(node).find((key) =>
@@ -6435,7 +6533,10 @@ function findGroups(
   function receive(eventName, args) {
     if (!enabled) return;
     const result = logic.consume(state, eventName, args);
-    if (result.type !== 'ignored' && result.type !== 'duplicate') scheduleRender();
+    if (result.type !== 'ignored' && result.type !== 'duplicate') {
+      scheduleSave();
+      scheduleRender();
+    }
   }
 
   function subscribe(bus) {
@@ -6460,6 +6561,7 @@ function findGroups(
   }
 
   function scan() {
+    syncCreator();
     if (!enabled || document.hidden || !/\/@[^/]+\/live\/?$/.test(location.pathname)) {
       scanStatus = enabled ? 'Open a TikTok LIVE room' : 'Off';
       scheduleRender();
@@ -6481,6 +6583,7 @@ function findGroups(
       if (found || !value || typeof value !== 'object' || seen.has(value) || depth > 7 || visited++ > 12000) return;
       seen.add(value);
       try {
+        if (value._messageEvents && typeof value._messageEvents.on === 'function') useRoom(roomIdOf(value));
         if (value._messageEvents && typeof value._messageEvents.on === 'function' && subscribe(value._messageEvents)) {
           found = true;
           return;
@@ -6546,8 +6649,8 @@ function findGroups(
       <section class="panel">
         <header><h3>🎁 LIVE Gift Tracker</h3><button class="clear" type="button">Clear</button><button class="collapse" type="button">−</button></header>
         <div class="body"><div class="status"></div><div class="stats"></div>
-          <div class="section">Top gifters this session</div><div class="leaders"></div>
-          <div class="section">Recent gifts</div><div class="list"></div></div>
+          <div class="section">Top gifters this LIVE session</div><div class="leaders"></div>
+          <div class="section history-title">Gift history</div><div class="list"></div></div>
       </section>`;
     const panel = shadow.querySelector('.panel');
     const saved = readPosition();
@@ -6581,7 +6684,9 @@ function findGroups(
       body.hidden = !body.hidden;
       event.currentTarget.textContent = body.hidden ? '+' : '−';
     });
-    shadow.querySelector('.clear').addEventListener('click', () => { state = logic.create(); render(); });
+    shadow.querySelector('.clear').addEventListener('click', () => {
+      state = logic.create(); persistSession(); render();
+    });
     render();
   }
 
@@ -6594,7 +6699,8 @@ function findGroups(
 
   function render() {
     if (!shadow) return;
-    shadow.querySelector('.status').textContent = scanStatus;
+    const sessionLabel = currentCreator ? `@${currentCreator}${currentRoomId ? ' · session saved' : ''}` : '';
+    shadow.querySelector('.status').textContent = [scanStatus, sessionLabel, storageWarning].filter(Boolean).join(' · ');
     const stats = shadow.querySelector('.stats');
     stats.replaceChildren(...[
       [state.totalGifts, 'Gifts'], [state.totalDiamonds, 'Diamonds'], [state.gifters.size, 'Gifters']
@@ -6607,15 +6713,17 @@ function findGroups(
     const top = logic.topGifters(state, 5);
     leaders.replaceChildren(...(top.length ? top.map((gifter, index) => {
       const row = element('div', 'top');
-      row.append(element('span', '', `${index + 1}. ${gifter.username ? '@' + gifter.username : gifter.displayName}`),
+      const identity = [gifter.displayName, gifter.username ? `@${gifter.username}` : null].filter(Boolean).join(' · ');
+      row.append(element('span', '', `${index + 1}. ${identity}`),
         element('span', '', `${gifter.diamonds.toLocaleString()} 💎`));
       return row;
     }) : [element('div', 'empty', 'No completed gifts yet.')]))
+    shadow.querySelector('.history-title').textContent = `Gift history · ${state.gifts.length} event${state.gifts.length === 1 ? '' : 's'}`;
     const list = shadow.querySelector('.list');
     list.replaceChildren(...(state.gifts.length ? state.gifts.map((gift) => {
       const row = element('div', 'row');
       const line = element('div', 'line');
-      const senderText = gift.username ? `@${gift.username}` : gift.displayName;
+      const senderText = [gift.displayName, gift.username ? `@${gift.username}` : null].filter(Boolean).join(' · ');
       line.append(element('span', 'sender', senderText),
         element('span', 'gift', `${gift.giftName} ×${gift.repeatCount}`));
       row.append(line);
@@ -6637,6 +6745,7 @@ function findGroups(
 
   function start() {
     enabled = true;
+    syncCreator();
     mount();
     scan();
     if (!scanTimer) scanTimer = setInterval(scan, 15000);
@@ -6644,13 +6753,14 @@ function findGroups(
 
   function stop() {
     enabled = false;
+    persistSession();
     clearInterval(scanTimer); scanTimer = null;
     clearTimeout(renderTimer); renderTimer = null;
     stopListeners();
     host?.remove(); host = shadow = null;
   }
 
-  window.addEventListener('pagehide', stopListeners);
+  window.addEventListener('pagehide', () => { persistSession(); stopListeners(); });
   document.addEventListener('visibilitychange', () => { if (enabled && !document.hidden) scan(); });
   window.__TTLC__?.register({
     id: MODULE_ID,
