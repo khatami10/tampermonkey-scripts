@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.1.0
+// @version      0.2.0
 // @description  Modular TikTok LIVE tools, beginning with reliable 1v1/2v2 Battle/PK UI repair.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -23,7 +23,7 @@
   const HOST_ID = 'ttlc-control-host';
   const modules = new Map();
   const listeners = new Set();
-  const defaults = { modules: { 'battle-pk': true }, panelCollapsed: false };
+  const defaults = { modules: { 'battle-pk': true }, panelPosition: null };
 
   function readSettings() {
     try {
@@ -106,7 +106,7 @@
         .panel { top: 88px; width: 310px; color: #f7f4fb; background: #17121f; border: 1px solid #7447a8;
           border-radius: 12px; box-shadow: 0 12px 34px #000a; overflow: hidden; }
         header { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px;
-          background: #21172c; border-bottom: 1px solid #3d2c50; }
+          background: #21172c; border-bottom: 1px solid #3d2c50; cursor: move; user-select: none; touch-action: none; }
         h2 { margin: 0; font-size: 14px; } .close { border: 0; color: #bbb; background: transparent; cursor: pointer; font-size: 20px; }
         .modules { padding: 10px; } .module { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
           padding: 10px; border-radius: 9px; background: #221b2b; }
@@ -125,12 +125,44 @@
     const launcher = shadow.querySelector('.launcher');
     const panel = shadow.querySelector('.panel');
     const list = shadow.querySelector('.modules');
+    const savedPosition = settings.panelPosition;
+    if (savedPosition && Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
+      panel.style.right = 'auto';
+      panel.style.left = `${Math.max(0, Math.min(innerWidth - 310, savedPosition.left))}px`;
+      panel.style.top = `${Math.max(0, Math.min(innerHeight - 120, savedPosition.top))}px`;
+    }
     const show = (visible) => {
       panel.hidden = !visible;
       launcher.hidden = visible;
     };
     launcher.addEventListener('click', () => show(true));
     shadow.querySelector('.close').addEventListener('click', () => show(false));
+    const header = shadow.querySelector('header');
+    let drag = null;
+    header.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || event.target.closest('button')) return;
+      const rect = panel.getBoundingClientRect();
+      drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      header.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    header.addEventListener('pointermove', (event) => {
+      if (!drag) return;
+      const left = Math.max(0, Math.min(innerWidth - panel.offsetWidth, drag.left + event.clientX - drag.x));
+      const top = Math.max(0, Math.min(innerHeight - panel.offsetHeight, drag.top + event.clientY - drag.y));
+      panel.style.right = 'auto';
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+    });
+    const finishDrag = () => {
+      if (!drag) return;
+      drag = null;
+      const rect = panel.getBoundingClientRect();
+      settings.panelPosition = { left: Math.round(rect.left), top: Math.round(rect.top) };
+      saveSettings();
+    };
+    header.addEventListener('pointerup', finishDrag);
+    header.addEventListener('pointercancel', finishDrag);
     shadow.addEventListener('change', async (event) => {
       const toggle = event.target.closest('[data-module]');
       if (!toggle) return;
@@ -155,6 +187,136 @@
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountUI, { once: true });
   else mountUI();
+})();
+
+/* ---- src/battle-diagnostics.js ---- */
+(() => {
+  'use strict';
+
+  const sid = (value) => value == null || value === '' ? null : String(value);
+  const first = (value) => Array.isArray(value) ? value[0] : value;
+  const STATUS = { 1: 'ACTIVE', 2: 'STARTING', 3: 'ENDED', 4: 'PREPARING' };
+
+  function payloadOf(args) {
+    let value = first(args);
+    if (value?.payload && Array.isArray(value.payload)) value = first(value.payload);
+    return value && typeof value === 'object' ? value : {};
+  }
+
+  function identity(eventName, args) {
+    const value = payloadOf(args);
+    const app = value.seiContent?.app_data || {};
+    const settings = value.battle_settings || value.battleSettings || {};
+    const common = value.common || {};
+    const battleId = sid(value.battle_id_str ?? value.battle_id ?? value.battleId ?? settings.battle_id_str ?? settings.battle_id ?? app.battle_id);
+    const channelId = sid(settings.channel_id_str ?? settings.channel_id ?? value.channel_id_str ?? value.channel_id ?? value.channelId ?? app.group_channel_id);
+    const messageId = sid(value.transaction_id ?? value.transactionId ?? value.log_id ?? value.logId ??
+      common.msg_id ?? common.message_id ?? common.log_id);
+    const teams = (value.team_armies || value.teamArmies || []).map((team) => ({
+      id: sid(team.team_id ?? team.teamId),
+      total: sid(team.team_total_score ?? team.teamTotalScore),
+      users: (team.team_user || team.teamUser || []).map((user) => sid(user.user_id_str ?? user.user_id ?? user.userId)).filter(Boolean)
+    }));
+    const armies = Object.entries(value.armies || {}).map(([id, army]) => [sid(id), sid(army?.hostScore ?? army?.host_score ?? army?.score)]);
+    return { eventName: String(eventName), battleId, channelId, messageId, teams, armies };
+  }
+
+  function dedupKey(eventName, args) {
+    return JSON.stringify(identity(eventName, args));
+  }
+
+  function create() {
+    return { sessions: {}, transitions: [], effects: [], layoutSignals: [], scoreHealth: [], domHealth: [],
+      duplicates: 0, lastLayout: {}, lastDomHealth: null };
+  }
+
+  function consume(state, eventName, args, ms = 0) {
+    const value = payloadOf(args);
+    const id = identity(eventName, args);
+    const settings = value.battle_settings || value.battleSettings || {};
+    const sessionKey = [id.channelId || 'no-channel', id.battleId || 'no-battle'].join(':');
+    const session = state.sessions[sessionKey] ||= {
+      battleId: id.battleId, channelId: id.channelId, lifecycle: 'UNKNOWN',
+      firstSeenMs: ms, lastSeenMs: ms, eventCount: 0, lastScores: null
+    };
+    session.lastSeenMs = ms;
+    session.eventCount++;
+
+    if (/LinkMicBattle$/i.test(eventName) || /WebcastLinkMicBattle$/i.test(eventName)) {
+      const rawStatus = Number(settings.status ?? value.status);
+      const lifecycle = STATUS[rawStatus] || (Number(value.action) === 1 ? 'ACTIVE' : 'UNKNOWN');
+      if (session.lifecycle !== lifecycle) {
+        state.transitions.push({ ms, sessionKey, from: session.lifecycle, to: lifecycle, action: value.action ?? null });
+        session.lifecycle = lifecycle;
+      }
+      session.battleType = settings.battle_type ?? settings.battleType ?? null;
+      session.teamSizes = (value.team_member || value.teamMember || []).map((team) =>
+        (team.user_ids || team.userIds || team.users || []).length);
+    }
+
+    if (/Armies/i.test(eventName)) {
+      const scores = id.teams.length ? id.teams.map((team) => team.total) : id.armies.map(([, score]) => score);
+      const numeric = scores.map(Number);
+      let health = 'UPDATING';
+      if (!scores.length) health = 'NO_SCORES';
+      else if (session.lastScores && scores.every((score, index) => score === session.lastScores[index])) health = 'UNCHANGED';
+      else if (session.lastScores && numeric.some((score, index) => Number.isFinite(score) && score < Number(session.lastScores[index])))
+        health = 'BACKWARDS_OR_NEW_PHASE';
+      session.lastScores = scores;
+      state.scoreHealth.push({ ms, sessionKey, health, scores });
+    }
+
+    if (/ItemCard|BattleTask|Gameplay|Barrage|Boost/i.test(eventName)) {
+      state.effects.push({ ms, sessionKey, eventName: String(eventName), messageId: id.messageId });
+    }
+    if (/LinkLayer|ScreenChange|LayoutState|LayoutUpdate|CohostLayout/i.test(eventName)) {
+      state.layoutSignals.push({ ms, sessionKey, eventName: String(eventName) });
+    }
+    if (eventName === 'sei_parsed') {
+      const app = value.seiContent?.app_data || {};
+      const layout = {
+        gridCount: Array.isArray(app.grids) ? app.grids.length : null,
+        matchStage: app.business_extra_info?.match_info?.match_stage ?? null,
+        matchType: app.business_extra_info?.match_info?.match_type ?? null,
+        subMatchType: app.business_extra_info?.match_info?.sub_match_type ?? null
+      };
+      const signature = JSON.stringify(layout);
+      if (state.lastLayout[sessionKey] !== signature) {
+        state.lastLayout[sessionKey] = signature;
+        state.layoutSignals.push({ ms, sessionKey, eventName: 'sei_parsed', ...layout });
+      }
+    }
+    return { sessionKey, identity: id };
+  }
+
+  function assessDom(state, dom, ms = 0) {
+    const session = Object.entries(state.sessions)
+      .filter(([, value]) => value.lifecycle !== 'ENDED')
+      .sort((a, b) => b[1].lastSeenMs - a[1].lastSeenMs)[0];
+    const eventScores = session?.[1]?.lastScores || [];
+    const domScores = (dom?.scores || []).map((score) => String(score).replace(/[^0-9.-]/g, '')).filter(Boolean);
+    const eventNumbers = eventScores.map(Number);
+    const domNumbers = domScores.map(Number);
+    let health = 'NO_ACTIVE_SCORE_EVENT';
+    if (eventScores.length) {
+      if (!dom?.scoreBar) health = 'DOM_MISSING';
+      else if (domScores.length < 2) health = 'DOM_PARTIAL';
+      else if (domNumbers.every((score) => score === 0) && eventNumbers.some((score) => score > 0))
+        health = 'DOM_ZERO_BUT_EVENT_NONZERO';
+      else if (eventNumbers.length === domNumbers.length && domNumbers.some((score, index) => score < eventNumbers[index]))
+        health = 'DOM_BEHIND_EVENT';
+      else health = 'DOM_HEALTHY';
+    }
+    const observation = { ms, sessionKey: session?.[0] || null, health, domScores, eventScores };
+    const signature = JSON.stringify({ sessionKey: observation.sessionKey, health, domScores, eventScores });
+    if (state.lastDomHealth !== signature) {
+      state.lastDomHealth = signature;
+      state.domHealth.push(observation);
+    }
+    return observation;
+  }
+
+  window.__TTLC_BATTLE_DIAGNOSTICS__ = Object.freeze({ create, consume, assessDom, dedupKey, identity });
 })();
 
 /* ---- src/modules/battle-pk.module.js ---- */
@@ -889,7 +1051,7 @@
 
     // Bounded event observation. No emit interception, replay, or native-state mutation.
     const liveCapture = { active: false, report: null, listeners: [], emitters: new WeakSet(),
-        timer: null, scans: 0, page: null, started: 0, baseline: null };
+        timer: null, scans: 0, page: null, started: 0, baseline: null, dedupKeys: new Set() };
 
     function diagnosticValue(value) {
         const seen = new WeakSet();
@@ -935,6 +1097,22 @@
             if (now - previous < 1000) { report.throttledSEI++; return; }
             report.lastSEIAt[stampKey] = now;
         }
+        const diagnostics = window.__TTLC_BATTLE_DIAGNOSTICS__;
+        if (diagnostics) {
+            try {
+                if (eventName !== 'sei_parsed') {
+                    const key = diagnostics.dedupKey(eventName, args);
+                    if (liveCapture.dedupKeys.has(key)) {
+                        report.battleTelemetry.duplicates++;
+                        return;
+                    }
+                    liveCapture.dedupKeys.add(key);
+                }
+                diagnostics.consume(report.battleTelemetry, eventName, args, now - liveCapture.started);
+            } catch (error) {
+                report.telemetryError = String(error);
+            }
+        }
         if (eventName !== 'sei_parsed') {
             report.imEvents.push({ ms: now - liveCapture.started, emitterPath, eventName, payload: diagnosticValue(args) });
             if (report.imEvents.length > 160) { report.imEvents.shift(); report.droppedIMEvents++; }
@@ -954,7 +1132,7 @@
     }
 
     const imCapture = { subscriptions: new WeakMap(), inspected: new WeakSet(), seenPayloads: new WeakSet() };
-    const battleEventName = name => /battle|link.?mic|co.?host|participant|Webcast.*Match/i.test(String(name));
+    const battleEventName = name => /battle|link.?mic|co.?host|participant|screen.?change|layout|barrage|boost|Webcast.*Match/i.test(String(name));
 
     function recordIMMessage(path, eventName, args) {
         if (!liveCapture.active || location.href !== liveCapture.page) return;
@@ -1141,8 +1319,13 @@
                 walk(fiber.memoizedProps, 'f' + i + '.props', 0);
                 walk(fiber.memoizedState, 'f' + i + '.state', 0);
             });
-            liveCapture.report.samples.push({ ms: Date.now() - liveCapture.started,
-                dom: domState(), visited, scanLimitReached: visited >= 50000 });
+            const sampleMs = Date.now() - liveCapture.started;
+            const sampleDOM = domState();
+            liveCapture.report.samples.push({ ms: sampleMs,
+                dom: sampleDOM, visited, scanLimitReached: visited >= 50000 });
+            try {
+                window.__TTLC_BATTLE_DIAGNOSTICS__?.assessDom(liveCapture.report.battleTelemetry, sampleDOM, sampleMs);
+            } catch (error) { liveCapture.report.telemetryError = String(error); }
             liveCapture.scans++;
             const label = document.getElementById('tt-live-capture');
             if (label) label.textContent = 'Stop & view capture (' + liveCapture.report.imEvents.length + ' messages, ' + liveCapture.report.events.length + ' SEI)';
@@ -1175,6 +1358,7 @@
         liveCapture.page = location.href;
         liveCapture.started = Date.now();
         liveCapture.emitters = new WeakSet();
+        liveCapture.dedupKeys = new Set();
         imCapture.subscriptions = new WeakMap();
         imCapture.inspected = new WeakSet();
         imCapture.seenPayloads = new WeakSet();
@@ -1183,7 +1367,8 @@
             note: 'Read-only event observation. Repair actions are blocked during capture. Empty capture does not prove no events were sent.',
             before: captureNativeState(), imEvents: [], imObjects: [], imSubscriptions: [],
             imMessageTypes: Object.create(null), imEnvelopeShapes: [], imMessagesObserved: 0, droppedIMEvents: 0, observedGroupChannels: [], emitters: [], events: [], samples: [],
-            totalEvents: 0, throttledSEI: 0, droppedOldEvents: 0, lastSEIAt: {} };
+            totalEvents: 0, throttledSEI: 0, droppedOldEvents: 0, lastSEIAt: {},
+            battleTelemetry: window.__TTLC_BATTLE_DIAGNOSTICS__?.create() || null };
         scanLiveCapture();
         liveCapture.timer = setInterval(() => {
             if (Date.now() - liveCapture.started >= 90000) finishLiveCapture('CAPTURE_COMPLETE');
