@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.2.0
+// @version      0.2.1
 // @description  Modular TikTok LIVE tools, beginning with reliable 1v1/2v2 Battle/PK UI repair.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -102,7 +102,8 @@
         :host { all: initial; }
         .launcher, .panel { position: fixed; right: 18px; z-index: 2147483647; font: 13px/1.35 system-ui, sans-serif; }
         .launcher { top: 88px; border: 1px solid #7447a8; border-radius: 999px; padding: 9px 12px;
-          color: #fff; background: #17121f; cursor: pointer; box-shadow: 0 7px 24px #0008; }
+          color: #fff; background: #17121f; cursor: move; box-shadow: 0 7px 24px #0008;
+          user-select: none; touch-action: none; }
         .panel { top: 88px; width: 310px; color: #f7f4fb; background: #17121f; border: 1px solid #7447a8;
           border-radius: 12px; box-shadow: 0 12px 34px #000a; overflow: hidden; }
         header { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px;
@@ -130,12 +131,60 @@
       panel.style.right = 'auto';
       panel.style.left = `${Math.max(0, Math.min(innerWidth - 310, savedPosition.left))}px`;
       panel.style.top = `${Math.max(0, Math.min(innerHeight - 120, savedPosition.top))}px`;
+      launcher.style.right = 'auto';
+      launcher.style.left = `${Math.max(0, Math.min(innerWidth - 100, savedPosition.left))}px`;
+      launcher.style.top = `${Math.max(0, Math.min(innerHeight - 40, savedPosition.top))}px`;
     }
     const show = (visible) => {
       panel.hidden = !visible;
       launcher.hidden = visible;
+      if (visible) {
+        const rect = panel.getBoundingClientRect();
+        panel.style.left = `${Math.max(0, Math.min(innerWidth - panel.offsetWidth, rect.left))}px`;
+        panel.style.top = `${Math.max(0, Math.min(innerHeight - panel.offsetHeight, rect.top))}px`;
+      }
     };
-    launcher.addEventListener('click', () => show(true));
+    let launcherDrag = null;
+    let launcherMoved = false;
+    launcher.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      const rect = launcher.getBoundingClientRect();
+      launcherDrag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      launcherMoved = false;
+      launcher.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    launcher.addEventListener('pointermove', (event) => {
+      if (!launcherDrag) return;
+      const dx = event.clientX - launcherDrag.x;
+      const dy = event.clientY - launcherDrag.y;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) launcherMoved = true;
+      const left = Math.max(0, Math.min(innerWidth - launcher.offsetWidth, launcherDrag.left + dx));
+      const top = Math.max(0, Math.min(innerHeight - launcher.offsetHeight, launcherDrag.top + dy));
+      launcher.style.right = 'auto';
+      launcher.style.left = `${left}px`;
+      launcher.style.top = `${top}px`;
+    });
+    const finishLauncherDrag = () => {
+      if (!launcherDrag) return;
+      launcherDrag = null;
+      const rect = launcher.getBoundingClientRect();
+      settings.panelPosition = { left: Math.round(rect.left), top: Math.round(rect.top) };
+      panel.style.right = 'auto';
+      panel.style.left = `${Math.max(0, Math.min(innerWidth - 310, rect.left))}px`;
+      panel.style.top = `${Math.max(0, Math.min(innerHeight - 120, rect.top))}px`;
+      saveSettings();
+    };
+    launcher.addEventListener('pointerup', finishLauncherDrag);
+    launcher.addEventListener('pointercancel', finishLauncherDrag);
+    launcher.addEventListener('click', (event) => {
+      if (launcherMoved) {
+        launcherMoved = false;
+        event.preventDefault();
+        return;
+      }
+      show(true);
+    });
     shadow.querySelector('.close').addEventListener('click', () => show(false));
     const header = shadow.querySelector('header');
     let drag = null;
@@ -159,6 +208,9 @@
       drag = null;
       const rect = panel.getBoundingClientRect();
       settings.panelPosition = { left: Math.round(rect.left), top: Math.round(rect.top) };
+      launcher.style.right = 'auto';
+      launcher.style.left = `${Math.max(0, Math.min(innerWidth - launcher.offsetWidth, rect.left))}px`;
+      launcher.style.top = `${Math.max(0, Math.min(innerHeight - launcher.offsetHeight, rect.top))}px`;
       saveSettings();
     };
     header.addEventListener('pointerup', finishDrag);
