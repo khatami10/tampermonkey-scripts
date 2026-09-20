@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.5.0
+// @version      0.6.0
 // @description  Modular TikTok LIVE Battle/PK repair with persistent per-session gift tracking.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -368,7 +368,27 @@
     return observation;
   }
 
-  window.__TTLC_BATTLE_DIAGNOSTICS__ = Object.freeze({ create, consume, assessDom, dedupKey, identity });
+  function classifyCohostLayout(event, roomId) {
+    const app = event?.seiContent?.app_data;
+    const grids = Array.isArray(app?.grids) ? app.grids : event?.combineRegions;
+    const channelId = sid(app?.channel_id);
+    const groupChannelId = sid(app?.group_channel_id);
+    if (app?.ver !== 2 || !roomId || channelId !== sid(roomId) || !groupChannelId ||
+        !Array.isArray(grids) || grids.length < 2) return null;
+    const base = { channelId, groupChannelId, battleId: sid(app.battle_id), gridCount: grids.length,
+      layoutKey: sid(app.container?.layout_key) };
+    if (grids.length === 2) return { ...base, kind: 'TWO_GRID' };
+    const noBattle = !base.battleId || base.battleId === '0';
+    const localAnchor = grids.some((grid) => sid(grid.cid) === channelId && Number(grid.u_type) === 2);
+    const remoteAnchor = grids.some((grid) => sid(grid.cid) !== channelId && Number(grid.u_type) === 2);
+    const multiGuestLayout = /cohost.*guest|guest.*cohost/i.test(base.layoutKey || '');
+    if (noBattle && grids.length <= 6 && localAnchor && remoteAnchor && multiGuestLayout)
+      return { ...base, kind: 'COHOST_WITH_GUESTS' };
+    return null;
+  }
+
+  window.__TTLC_BATTLE_DIAGNOSTICS__ = Object.freeze({ create, consume, assessDom, dedupKey, identity,
+    classifyCohostLayout });
 })();
 
 /* ---- src/modules/battle-pk.module.js ---- */
@@ -2353,14 +2373,15 @@
                 const listener = event => {
                     const app = event?.seiContent?.app_data;
                     const grids = Array.isArray(app?.grids) ? app.grids : event?.combineRegions;
-                    if (missingLayout.page !== location.href || app?.ver !== 2 ||
-                        sid(app.channel_id) !== missingLayout.roomId || !sid(app.group_channel_id) ||
-                        !Array.isArray(grids) || grids.length !== 2) return;
+                    const classification = window.__TTLC_BATTLE_DIAGNOSTICS__?.classifyCohostLayout(
+                        event, missingLayout.roomId);
+                    if (missingLayout.page !== location.href || !classification || !Array.isArray(grids)) return;
                     missingLayout.event = event;
                     missingLayout.meta = { capturedAt: new Date().toISOString(), timestamp: Date.now(), path,
                         ver: app.ver, roomChannelId: sid(app.channel_id),
                         groupChannelId: sid(app.group_channel_id), battleId: sid(app.battle_id),
-                        gridCount: grids.length, isInChatting: event.isInChatting };
+                        gridCount: grids.length, layoutKind: classification.kind,
+                        layoutKey: classification.layoutKey, isInChatting: event.isInChatting };
                 };
                 try {
                     value.on('sei_parsed', listener);
@@ -2416,7 +2437,7 @@
             if (!event || !meta || Date.now() - meta.timestamp > 5000 || app?.ver !== 2 ||
                 sid(app.channel_id) !== discovery.current.roomId ||
                 sid(app.group_channel_id) !== meta.groupChannelId)
-                throw new Error('Fresh two-person SEI for the exact current room is unavailable');
+                throw new Error('Fresh Cohost SEI for the exact current room is unavailable');
             report.context = { roomId: discovery.current.roomId, anchorId: discovery.current.anchorId,
                 groupChannelId: meta.groupChannelId, battleId: meta.battleId };
             report.realSEI = { ...meta };
