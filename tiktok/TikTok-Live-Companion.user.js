@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.7.0
+// @version      0.7.1
 // @description  Modular TikTok LIVE Battle/PK repair with persistent per-session gift tracking.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -1041,7 +1041,7 @@
             capturedAt:
                 new Date().toISOString(),
 
-            version: '2.6.10',
+            version: '2.6.11',
 
             page:
                 location.href
@@ -1051,7 +1051,7 @@
     // Read-only diagnostics: never substitute a different room's module.
     function captureNativeState() {
         const result = { capturedAt: new Date().toISOString(), page: location.href,
-            version: '2.6.10', dom: domState(), modules: [], partialModules: [] };
+            version: '2.6.11', dom: domState(), modules: [], partialModules: [] };
         try {
             const root = committedRoot();
             if (!root) return { ...result, discovery: 'NO_REACT_ROOT' };
@@ -3488,7 +3488,7 @@
 
     function diagnoseBattle() {
         const previousRepair = lastReport;
-        lastReport = { ...makeReportBase(), version: '2.6.10', mode: 'READ_ONLY_DIAGNOSTIC',
+        lastReport = { ...makeReportBase(), version: '2.6.11', mode: 'READ_ONLY_DIAGNOSTIC',
             nativeState: captureNativeState(), previousRepair };
         showReport();
     }
@@ -4297,7 +4297,7 @@ function findGroups(
 
 
     // v2.2: real-SEI A2 path. A1 and B1 implementations below are unchanged.
-    const a2 = { enabled: false, key: null, page: null, event: null, meta: null,
+    const a2 = { enabled: true, key: null, page: null, event: null, meta: null,
         listeners: new Map(), retryAt: 0, scanning: false };
 
     function source(fn) {
@@ -6050,7 +6050,7 @@ function findGroups(
             delete child.dataset.expandedDisplay;
         }
         if (head) {
-            head.textContent = 'TikTok Battle Repair · 2.6.10';
+            head.textContent = 'TikTok Battle Repair · 2.6.11';
             head.title = '';
             Object.assign(head.style, { width: 'auto', height: 'auto', display: 'block',
                 alignItems: '', justifyContent: '', padding: '7px', borderRadius: '7px',
@@ -6096,7 +6096,7 @@ function findGroups(
             borderRadius: '10px', padding: '7px', boxSizing: 'border-box', font: '11px Arial',
             boxShadow: '0 12px 32px rgba(0,0,0,.65)' });
         const head = document.createElement('div');
-        head.textContent = 'TikTok Battle Repair · 2.6.10';
+        head.textContent = 'TikTok Battle Repair · 2.6.11';
         Object.assign(head.style, { cursor: 'move', textAlign: 'center', padding: '7px', color: '#d4b1ff',
             fontWeight: 'bold', background: '#21182b', borderRadius: '7px' });
         head.addEventListener('click', () => {
@@ -6232,6 +6232,7 @@ function findGroups(
         description: 'Restores missing 1v1/2v2 scores, layouts, and cohost names.',
         start() {
             moduleEnabled = true;
+            a2.enabled = true;
             hidden = false;
             ensurePanel();
         },
@@ -6781,56 +6782,63 @@ function findGroups(
     shadow.innerHTML = `
       <style>
         :host { all: initial; }
-        .panel { position: fixed; left: 18px; top: 88px; z-index: 2147483646; width: 360px; color: #f8f5fb;
-          background: #15111c; border: 1px solid #70459e; border-radius: 12px; box-shadow: 0 12px 34px #000a;
+        .panel { position: fixed; left: 18px; top: 88px; z-index: 2147483646; width: 314px; color: #f8f5fb;
+          background: #15111c; border: 1px solid #70459e; border-radius: 11px; box-shadow: 0 12px 30px #000a;
           overflow: hidden; font: 12px/1.35 system-ui, sans-serif; }
-        header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #21172c; cursor: move;
+        header { display: flex; align-items: center; gap: 6px; padding: 7px 9px; background: #21172c; cursor: move;
           user-select: none; touch-action: none; }
-        h3 { flex: 1; margin: 0; font-size: 13px; } button { border: 0; border-radius: 6px; padding: 4px 7px;
-          color: #ddd; background: #342641; cursor: pointer; } .body { padding: 10px; }
-        .status { color: #b992e4; font-size: 11px; margin-bottom: 8px; }
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; }
-        .stat { padding: 7px; text-align: center; border-radius: 7px; background: #241b2d; }
-        .value { display: block; color: #fff; font-weight: 700; font-size: 14px; }
-        .label { color: #938b9a; font-size: 10px; } .section { margin: 8px 0 4px; color: #aaa; font-size: 10px;
+        h3 { flex: 1; margin: 0; font-size: 13px; } button { border: 0; border-radius: 6px; padding: 3px 6px;
+          color: #ddd; background: #342641; cursor: pointer; } .body { padding: 7px; }
+        .status { color: #b992e4; font-size: 10px; margin-bottom: 6px; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 6px; }
+        .stat { padding: 5px 4px; text-align: center; border-radius: 6px; background: #241b2d; }
+        .value { display: block; color: #fff; font-weight: 700; font-size: 13px; }
+        .label { color: #938b9a; font-size: 10px; } .section { margin: 6px 0 4px; color: #aaa; font-size: 9px;
           letter-spacing: .05em; text-transform: uppercase; }
-        .list { display: grid; gap: 6px; max-height: 260px; overflow: auto; }
-        .row { min-height: 84px; padding: 10px 11px; border-radius: 8px; color: #f8f5fb;
+        .list { display: grid; gap: 4px; max-height: 248px; overflow: auto; }
+        .row { position: relative; padding: 5px 7px 15px; border-radius: 8px; color: #f8f5fb;
           background: linear-gradient(90deg, #1e1924, #17131c); box-shadow: inset 0 0 0 1px #342b3d; }
-        .line { display: flex; justify-content: space-between; gap: 11px; align-items: flex-start; }
+        .line { display: flex; justify-content: space-between; gap: 6px; align-items: flex-start; }
         .identity { display: flex; flex-wrap: wrap; gap: 3px 6px; min-width: 0; }
         .display-name { color: #f1e8f7; font-weight: 700; } .username { color: #51d7ff; font-weight: 650; }
-        .person { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding-top: 1px; }
-        .gifter-identity { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
-        .gifter-identity .display-name { font-size: 15px; line-height: 1.15; }
-        .gifter-identity .username { font-size: 13px; line-height: 1.15; }
-        .level-badge.native { flex: none; width: 37px; height: 27px; object-fit: contain; }
-        .level-badge.fallback { flex: none; display: flex; align-items: center; justify-content: center; width: 37px;
-          height: 27px; padding-bottom: 2px; clip-path: polygon(14% 5%,86% 5%,100% 34%,83% 86%,50% 100%,17% 86%,0 34%);
-          color: #fff; background: linear-gradient(145deg,#54d6ff,#6162ef 48%,#b348dc); filter: drop-shadow(0 2px 3px #0008);
-          text-shadow: 0 1px 2px #191252; font-size: 11px; font-weight: 800; }
-        .level-badge.fallback::before { content: '★'; margin-right: 2px; color: #fff8b2; font-size: 8px; }
+        .person { display: flex; align-items: flex-start; gap: 5px; min-width: 0; }
+        .gifter-identity { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+        .gifter-identity .display-name { font-size: 14px; line-height: 1.1; }
+        .gifter-identity .username { font-size: 12px; line-height: 1.1; }
+        .level-badge { flex: none; display: grid; place-items: center; min-width: 28px; height: 19px; padding: 1px 5px;
+          border-radius: 5px; color: #fff; background: linear-gradient(135deg,#5064d4,#3d49af);
+          box-shadow: inset 0 0 0 1px #ffffff16; text-shadow: 0 1px 2px #17145e; font-size: 11px; font-weight: 800; }
+        .level-badge.level-30 { background: linear-gradient(135deg,#357bd2,#3d58b7); }
+        .level-badge.level-40 { background: linear-gradient(135deg,#7254e4,#4547bb); }
+        .level-badge.level-50 { background: linear-gradient(135deg,#bb4ac8,#6e3db6); }
         .gift-info { flex: none; display: flex; flex-direction: column; align-items: flex-end; min-width: 112px;
-          padding-left: 10px; border-left: 1px solid #3b3342; text-align: right; }
-        .cost-line { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding-bottom: 3px;
+          padding-left: 6px; border-left: 1px solid #3b3342; text-align: right; }
+        .cost-line { display: flex; align-items: center; justify-content: flex-end; gap: 5px; padding-bottom: 3px;
           border-bottom: 1px solid #51475a; white-space: nowrap; }
-        .gift-art { width: 25px; height: 25px; border-radius: 7px; object-fit: contain; background: #302936;
+        .gift-art { width: 20px; height: 20px; border-radius: 5px; object-fit: contain; background: #302936;
           box-shadow: inset 0 0 0 1px #ffffff12; }
-        .cost { color: #e9e3ed; font-size: 15px; font-weight: 800; }
-        .gift-name { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 6px; color: #bcb4c3; }
-        .glove { color: #ff3b45; font-size: 22px; line-height: 1;
-          filter: sepia(1) saturate(8) hue-rotate(325deg) brightness(1.15) drop-shadow(0 0 4px #ff1f2d) drop-shadow(0 0 9px #ff2336); }
+        .cost { color: #e9e3ed; font-size: 14px; font-weight: 800; }
+        .gift-name { display: flex; align-items: center; justify-content: flex-end; gap: 5px; margin-top: 3px; color: #bcb4c3; }
+        .timestamp { position: absolute; left: 7px; bottom: 3px; color: #756d7c; font-size: 9px; line-height: 1; }
+        .glove { color: #ff3b45; font-size: 18px; line-height: 1;
+          filter: sepia(1) saturate(8) hue-rotate(325deg) brightness(1.15) drop-shadow(0 0 4px #ff1f2d) drop-shadow(0 0 8px #ff2336); }
         .meta, .empty { color: #8f8795; font-size: 10px; }
         .resolved { color: #72e59a; } .unknown { color: #ffbd66; } .top { display: grid; grid-template-columns: 1fr auto;
-          gap: 4px 8px; padding: 4px; } [hidden] { display: none !important; }
+          gap: 3px 6px; padding: 2px 3px; } [hidden] { display: none !important; }
         .row.high-value { border: 1px solid #ee4f79; background: radial-gradient(circle at 100% 0,#6b153455,transparent 46%),#1c1118;
           box-shadow: inset 0 0 22px #df265222,0 0 12px #e9306633; }
         .row.high-value .gift-info { border-left-color: #ee4f7966; }
-        .row.high-value .cost { color: #ff87a6; font-size: 20px; text-shadow: 0 0 11px #e93066; }
-        .row.high-value .gift-art { width: 30px; height: 30px; background: #44182b; }
+        .row.high-value .cost { color: #ff87a6; font-size: 17px; text-shadow: 0 0 11px #e93066; }
+        .row.high-value .gift-art { width: 24px; height: 24px; background: #44182b; }
         .row.high-value .gift-name { color: #e7ccd5; }
-        .new-gifts { display: flex; width: 100%; align-items: center; justify-content: space-between; margin: 5px 0 7px;
-          padding: 6px 8px; color: #ddc7ef; background: #2a2033; }
+        .new-gifts { display: flex; width: 100%; align-items: center; justify-content: space-between; margin: 4px 0 5px;
+          padding: 4px 6px; color: #ddc7ef; background: #2a2033; }
+        .panel.collapsed { width: 46px; height: 46px; border-color: #21c7b8; border-radius: 50%;
+          background: #073f46; box-shadow: 0 0 16px #15bdae66,0 10px 28px #000a; }
+        .panel.collapsed header { width: 46px; height: 46px; justify-content: center; padding: 0; border-radius: 50%;
+          color: #d9fffb; background: radial-gradient(circle at 35% 25%,#20aeb0,#08707b 58%,#064652); }
+        .panel.collapsed h3 { flex: none; font-size: 20px; line-height: 1; }
+        .panel.collapsed header button, .panel.collapsed .body { display: none; }
       </style>
       <section class="panel">
         <header><h3>🎁 LIVE Gift Tracker</h3><button class="clear" type="button">Clear</button><button class="collapse" type="button">−</button></header>
@@ -6841,7 +6849,7 @@ function findGroups(
     const panel = shadow.querySelector('.panel');
     const saved = readPosition();
     if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
-      panel.style.left = `${Math.max(0, Math.min(innerWidth - 360, saved.left))}px`;
+      panel.style.left = `${Math.max(0, Math.min(innerWidth - 314, saved.left))}px`;
       panel.style.top = `${Math.max(0, Math.min(innerHeight - 50, saved.top))}px`;
     }
     let drag = null;
@@ -6849,26 +6857,39 @@ function findGroups(
     header.addEventListener('pointerdown', (event) => {
       if (event.button !== 0 || event.target.closest('button')) return;
       const rect = panel.getBoundingClientRect();
-      drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
+      drag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top, moved: false };
       header.setPointerCapture(event.pointerId); event.preventDefault();
     });
     header.addEventListener('pointermove', (event) => {
       if (!drag) return;
+      if (Math.abs(event.clientX - drag.x) > 4 || Math.abs(event.clientY - drag.y) > 4) drag.moved = true;
       panel.style.left = `${Math.max(0, Math.min(innerWidth - panel.offsetWidth, drag.left + event.clientX - drag.x))}px`;
       panel.style.top = `${Math.max(0, Math.min(innerHeight - panel.offsetHeight, drag.top + event.clientY - drag.y))}px`;
     });
     const finishDrag = () => {
       if (!drag) return;
+      panel.dataset.justDragged = drag.moved ? 'true' : 'false';
+      setTimeout(() => { delete panel.dataset.justDragged; }, 0);
       drag = null;
       const rect = panel.getBoundingClientRect();
       localStorage.setItem(POSITION_KEY, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) }));
     };
     header.addEventListener('pointerup', finishDrag);
     header.addEventListener('pointercancel', finishDrag);
+    const setCollapsed = (collapsed) => {
+      panel.classList.toggle('collapsed', collapsed);
+      shadow.querySelector('h3').textContent = collapsed ? '🎁' : '🎁 LIVE Gift Tracker';
+      shadow.querySelector('.collapse').textContent = collapsed ? '+' : '−';
+      const rect = panel.getBoundingClientRect();
+      panel.style.left = `${Math.max(0, Math.min(innerWidth - panel.offsetWidth, rect.left))}px`;
+      panel.style.top = `${Math.max(0, Math.min(innerHeight - panel.offsetHeight, rect.top))}px`;
+    };
+    header.addEventListener('click', () => {
+      if (panel.classList.contains('collapsed') && panel.dataset.justDragged !== 'true') setCollapsed(false);
+    });
     shadow.querySelector('.collapse').addEventListener('click', (event) => {
-      const body = shadow.querySelector('.body');
-      body.hidden = !body.hidden;
-      event.currentTarget.textContent = body.hidden ? '+' : '−';
+      event.stopPropagation();
+      setCollapsed(true);
     });
     shadow.querySelector('.clear').addEventListener('click', () => {
       state = logic.create(); unseenGiftCount = 0; persistSession(); render();
@@ -6882,6 +6903,7 @@ function findGroups(
       list.scrollTo({ top: 0, behavior: 'smooth' });
       renderNewGiftNotice();
     });
+    setCollapsed(true);
     render();
   }
 
@@ -6893,7 +6915,10 @@ function findGroups(
   }
 
   function fallbackLevelBadge(level) {
-    return level ? element('span', 'level-badge fallback', String(level)) : null;
+    if (!level) return null;
+    const value = Number(level);
+    const tier = value >= 50 ? ' level-50' : value >= 40 ? ' level-40' : value >= 30 ? ' level-30' : '';
+    return element('span', `level-badge${tier}`, String(level));
   }
 
   function imageElement(src, className, alt, fallback = null) {
@@ -6946,9 +6971,7 @@ function findGroups(
       if (highValue) row.classList.add('high-value');
       const line = element('div', 'line');
       const person = element('div', 'person');
-      const levelFallback = fallbackLevelBadge(gift.gifterLevel);
-      const levelBadge = imageElement(gift.gifterBadgeUrl, 'level-badge native',
-        gift.gifterLevel ? `Gifter level ${gift.gifterLevel}` : 'TikTok gifter level', levelFallback);
+      const levelBadge = fallbackLevelBadge(gift.gifterLevel);
       if (levelBadge) person.append(levelBadge);
       const identity = element('span', 'gifter-identity');
       identity.append(element('span', 'display-name', gift.displayName));
@@ -6968,6 +6991,10 @@ function findGroups(
       giftInfo.append(costLine, giftName);
       line.append(person, giftInfo);
       row.append(line);
+      const timestamp = element('span', 'timestamp', new Date(Number(gift.at) || Date.now()).toLocaleTimeString([], {
+        hour: 'numeric', minute: '2-digit', second: '2-digit'
+      }));
+      row.append(timestamp);
       const details = [];
       if (!gift.final) details.push('streaking…');
       if (gift.anonymous) details.push(gift.username ? 'Enigma resolved from event ID' :
