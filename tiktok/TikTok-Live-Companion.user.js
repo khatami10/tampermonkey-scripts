@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.4.0
+// @version      0.5.0
 // @description  Modular TikTok LIVE Battle/PK repair with persistent per-session gift tracking.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -5725,7 +5725,7 @@ function findGroups(
     }
 
     function cohostPanelInfo() {
-        const info = { active: false, battleActive: false, opponentName: null };
+        const info = { active: false, battleActive: false, opponentName: null, battleEvidence: null };
         try {
             const root = committedRoot();
             if (!root) return info;
@@ -5733,14 +5733,39 @@ function findGroups(
             const current = chooseCurrentRoom(data.rooms);
             const controller = findController(data.fibers);
             if (!current) return info;
-            const events = [opponentData.sei, missingLayout.event, preCohost.event].filter(Boolean);
-            const currentSEI = events.find(event => sid(event?.seiContent?.app_data?.channel_id) === current.roomId &&
-                Array.isArray(event?.seiContent?.app_data?.grids) && event.seiContent.app_data.grids.length === 2);
+            const now = Date.now();
+            const seiEntries = [
+                { event: opponentData.sei, at: opponentData.seiAt },
+                { event: missingLayout.event, at: missingLayout.meta?.timestamp },
+                { event: preCohost.event, at: preCohost.meta?.timestamp },
+                { event: twoVTwo.sei, at: twoVTwo.seiAt },
+                { event: groupCohost.event, at: groupCohost.at }
+            ].filter(entry => entry.event);
+            const currentSEIEntry = seiEntries.find(entry => sid(entry.event?.seiContent?.app_data?.channel_id) === current.roomId &&
+                Array.isArray(entry.event?.seiContent?.app_data?.grids));
+            const currentSEI = currentSEIEntry?.event;
             const app = currentSEI?.seiContent?.app_data;
-            const seiBattleId = sid(app?.battle_id);
             info.active = !!(domState().battleRoot || controller?.shown?.includes('Cohost') || currentSEI);
-            info.battleActive = !!(domState().scoreBar || (seiBattleId && seiBattleId !== '0') ||
-                getBattleId(current.battle));
+            const scoreBarVisible = domState().scoreBar;
+            const recentSEIBattle = seiEntries.some(({ event, at }) => {
+                const eventApp = event?.seiContent?.app_data;
+                const battleId = sid(eventApp?.battle_id);
+                return Number.isFinite(at) && now - at <= 12000 && sid(eventApp?.channel_id) === current.roomId &&
+                    battleId && battleId !== '0';
+            });
+            const recentBattleOpen = [
+                { event: opponentData.battle, at: opponentData.battleAt },
+                { event: twoVTwo.battle, at: twoVTwo.battleAt }
+            ].some(({ event, at }) => Number.isFinite(at) && now - at <= 30000 &&
+                sid(event?.common?.room_id) === current.roomId && Number(event?.action) === 4 && !!opponentBattleId(event));
+            const recentArmies = [
+                { event: opponentData.armies, at: opponentData.armiesAt },
+                { event: twoVTwo.armies, at: twoVTwo.armiesAt }
+            ].some(({ event, at }) => Number.isFinite(at) && now - at <= 12000 &&
+                sid(event?.common?.room_id) === current.roomId && !!opponentBattleId(event));
+            info.battleActive = !!(scoreBarVisible || recentSEIBattle || recentBattleOpen || recentArmies);
+            info.battleEvidence = scoreBarVisible ? 'visible-scorebar' : recentSEIBattle ? 'fresh-sei' :
+                recentBattleOpen ? 'fresh-battle-open' : recentArmies ? 'fresh-armies' : null;
             const lists = [];
             if (Array.isArray(current.users)) lists.push(current.users);
             for (const room of data.rooms) {
@@ -5993,10 +6018,11 @@ function findGroups(
         if (!panel) return;
         collapsed = false;
         panel.dataset.collapsed = 'false';
-        panel.style.width = '280px';
+        panel.style.width = '340px';
         panel.style.height = 'auto';
-        panel.style.borderRadius = '5px';
-        panel.style.padding = '5px';
+        panel.style.borderRadius = '10px';
+        panel.style.padding = '7px';
+        panel.style.overflow = 'visible';
         const [head, ...content] = [...panel.children];
         for (const child of content) {
             child.style.display = child.dataset.expandedDisplay ?? '';
@@ -6006,7 +6032,8 @@ function findGroups(
             head.textContent = 'TikTok Battle Repair · 2.6.10';
             head.title = '';
             Object.assign(head.style, { width: 'auto', height: 'auto', display: 'block',
-                alignItems: '', justifyContent: '', padding: '4px', borderRadius: '0' });
+                alignItems: '', justifyContent: '', padding: '7px', borderRadius: '7px',
+                background: '#21182b', font: 'bold 11px Arial', cursor: 'move' });
         }
         const r = panel.getBoundingClientRect();
         panel.style.left = Math.max(0, Math.min(innerWidth - panel.offsetWidth, r.left)) + 'px';
@@ -6041,22 +6068,22 @@ function findGroups(
         if (!moduleEnabled || hidden || !document.body || document.getElementById(PANEL_ID)) return;
         const saved = loadPosition();
         const panel = document.createElement('div'); panel.id = PANEL_ID;
-        Object.assign(panel.style, { position: 'fixed', zIndex: '2147483646', width: '280px',
-            left: Math.max(0, Math.min(innerWidth - 280, saved?.left ?? innerWidth * .72)) + 'px',
+        Object.assign(panel.style, { position: 'fixed', zIndex: '2147483646', width: '340px',
+            left: Math.max(0, Math.min(innerWidth - 340, saved?.left ?? innerWidth * .72)) + 'px',
             top: Math.max(0, Math.min(innerHeight - 220, saved?.top ?? 150)) + 'px',
-            background: '#101010', color: '#fff', border: '1px solid #b48cff',
-            borderRadius: '5px', padding: '5px', boxSizing: 'border-box', font: '11px Arial' });
+            background: '#100d14', color: '#fff', border: '1px solid #7951a5',
+            borderRadius: '10px', padding: '7px', boxSizing: 'border-box', font: '11px Arial',
+            boxShadow: '0 12px 32px rgba(0,0,0,.65)' });
         const head = document.createElement('div');
         head.textContent = 'TikTok Battle Repair · 2.6.10';
-        Object.assign(head.style, { cursor: 'move', textAlign: 'center', padding: '4px', color: '#b48cff' });
+        Object.assign(head.style, { cursor: 'move', textAlign: 'center', padding: '7px', color: '#d4b1ff',
+            fontWeight: 'bold', background: '#21182b', borderRadius: '7px' });
         head.addEventListener('click', () => {
             if (panel.dataset.collapsed === 'true' && panel.dataset.justDragged !== 'true') expandPanel();
         });
         const status = document.createElement('div'); status.id = 'tt-1v1-auto-status';
         status.textContent = 'Checking battle UI…';
-        Object.assign(status.style, { textAlign: 'center', margin: '5px 0' });
-        const row = document.createElement('div');
-        Object.assign(row.style, { display: 'flex', gap: '4px', flexWrap: 'wrap' });
+        Object.assign(status.style, { textAlign: 'center', margin: '0 0 4px', fontWeight: 'bold', fontSize: '12px' });
         const run = uiButton('Check & repair', async () => {
             if (running) return;
             try { await autoRepair(); } catch (error) { fail(String(error)); }
@@ -6064,10 +6091,11 @@ function findGroups(
         run.id = 'tt-1v1-auto-check';
         const detail = document.createElement('div');
         detail.id = 'tt-1v1-auto-detail';
-        Object.assign(detail.style, { lineHeight: '17px', margin: '8px 2px', color: '#ddd' });
+        Object.assign(detail.style, { lineHeight: '16px', margin: '4px 0', color: '#ddd', textAlign: 'center' });
         const monitoring = document.createElement('div');
         monitoring.id = 'tt-1v1-auto-monitoring';
-        Object.assign(monitoring.style, { margin: '8px 2px', color: '#aaa' });
+        Object.assign(monitoring.style, { marginTop: '5px', paddingTop: '5px', color: '#aaa', textAlign: 'center',
+            borderTop: '1px solid #3b3044' });
         const toggle = uiButton('Pause automatic repair', () => {
             a2.enabled = !a2.enabled;
             toggle.textContent = a2.enabled ? 'Pause automatic repair' : 'Resume automatic repair';
@@ -6078,9 +6106,44 @@ function findGroups(
         toggle.textContent = a2.enabled ? 'Pause automatic repair' : 'Resume automatic repair';
         const record = uiButton('Record live events (90s)', startLiveCapture);
         record.id = 'tt-live-capture';
-        row.append(record);
-        row.append(run, uiButton('Test 3/4 cohost names', repairGroupCohostNames, '#006b72'), uiButton('Test 2v2 missing layout', repairMissingTwoVTwo, '#006b72'), uiButton('Test 1v1 missing layout', repairMissingLayout, '#7a4a00'), uiButton('Test 1v1 cohost name', repairCohostName, '#7a4a00'), uiButton('Test 1v1 opponent restart', repairOpponentByRemount, '#7a4a00'), uiButton('View report', showReport), toggle, uiButton('Collapse panel', hidePanel));
-        panel.append(head, status, detail, monitoring, row); document.body.append(panel); makeDraggable(panel, head);
+        const section = label => {
+            const box = document.createElement('div');
+            Object.assign(box.style, { marginTop: '7px', padding: '7px', border: '1px solid #33293d',
+                borderRadius: '7px', background: '#17131c' });
+            const title = document.createElement('div');
+            title.textContent = label;
+            Object.assign(title.style, { marginBottom: '6px', color: '#9d91a8', fontSize: '9px',
+                fontWeight: 'bold', letterSpacing: '.08em', textTransform: 'uppercase' });
+            const body = document.createElement('div');
+            Object.assign(body.style, { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px' });
+            box.append(title, body);
+            return { box, body };
+        };
+        const fit = (button, full = false) => {
+            button.style.setProperty('width', '100%', 'important');
+            button.style.setProperty('box-sizing', 'border-box', 'important');
+            if (full) button.style.setProperty('grid-column', '1 / -1', 'important');
+            return button;
+        };
+        const statusCard = document.createElement('div');
+        Object.assign(statusCard.style, { marginTop: '7px', padding: '8px', borderRadius: '7px',
+            background: '#191520', border: '1px solid #3e3150' });
+        statusCard.append(status, detail, monitoring);
+        const automatic = section('Automatic repair');
+        automatic.body.append(fit(run), fit(toggle));
+        const targeted = section('Targeted repair tests');
+        targeted.body.append(
+            fit(uiButton('Group names · 3/4', repairGroupCohostNames, '#006b72')),
+            fit(uiButton('2v2 missing layout', repairMissingTwoVTwo, '#006b72')),
+            fit(uiButton('1v1 missing layout', repairMissingLayout, '#7a4a00')),
+            fit(uiButton('1v1 cohost name', repairCohostName, '#7a4a00')),
+            fit(uiButton('Restart 1v1 opponent', repairOpponentByRemount, '#7a4a00'), true)
+        );
+        const diagnostics = section('Diagnostics and panel');
+        diagnostics.body.append(fit(record), fit(uiButton('View last report', showReport)),
+            fit(uiButton('Collapse to PK button', hidePanel), true));
+        panel.append(head, statusCard, automatic.box, targeted.box, diagnostics.box);
+        document.body.append(panel); makeDraggable(panel, head);
         if (collapsed) hidePanel();
         refreshPanelStatus();
     }
@@ -6346,7 +6409,8 @@ function findGroups(
       parsed.giftId || parsed.giftName].join('|');
     const row = { id: `${pendingKey}|${now}`, pendingKey, at: now, displayName, username: realUsername,
       anonymous: parsed.anonymous, resolution, identityKey: parsed.identity.key, giftName: parsed.giftName,
-      giftId: parsed.giftId, repeatCount: parsed.repeatCount, diamonds: parsed.perUnitDiamonds * parsed.repeatCount,
+      giftId: parsed.giftId, repeatCount: parsed.repeatCount, unitDiamonds: parsed.perUnitDiamonds,
+      diamonds: parsed.perUnitDiamonds * parsed.repeatCount,
       recipient: parsed.recipient || null, final: parsed.final };
 
     if (parsed.streakable && !parsed.final) {
@@ -6641,10 +6705,19 @@ function findGroups(
         .label { color: #938b9a; font-size: 10px; } .section { margin: 8px 0 4px; color: #aaa; font-size: 10px;
           letter-spacing: .05em; text-transform: uppercase; }
         .list { max-height: 190px; overflow: auto; } .row { padding: 6px 4px; border-top: 1px solid #2b2234; }
-        .line { display: flex; justify-content: space-between; gap: 8px; } .sender { color: #dfc3ff; font-weight: 650; }
-        .gift { color: #65e2e8; } .meta, .empty { color: #8f8795; font-size: 10px; }
+        .line { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+        .identity { display: flex; flex-wrap: wrap; gap: 3px 6px; min-width: 0; }
+        .display-name { color: #f1e8f7; font-weight: 700; } .username { color: #51d7ff; font-weight: 650; }
+        .gift { color: #65e2e8; text-align: right; } .meta, .empty { color: #8f8795; font-size: 10px; }
         .resolved { color: #72e59a; } .unknown { color: #ffbd66; } .top { display: grid; grid-template-columns: 1fr auto;
           gap: 4px 8px; padding: 4px; } [hidden] { display: none !important; }
+        .row.high-value { margin: 5px 0; padding: 8px; border: 1px solid #ffd45c; border-radius: 9px;
+          background: linear-gradient(120deg, #4a2418, #3c183f 55%, #172d42); animation: premiumGlow 1.8s ease-in-out infinite alternate; }
+        .row.high-value .gift { color: #ffe27a; font-weight: 800; text-shadow: 0 0 8px #ffb13b; }
+        .premium-badge { display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 999px;
+          color: #2a1600; background: linear-gradient(90deg, #ffd45c, #ff9bd5); font-size: 9px; font-weight: 900; }
+        @keyframes premiumGlow { from { box-shadow: 0 0 4px #ffd45c55; } to { box-shadow: 0 0 14px #ff8ad888; } }
+        @media (prefers-reduced-motion: reduce) { .row.high-value { animation: none; } }
       </style>
       <section class="panel">
         <header><h3>🎁 LIVE Gift Tracker</h3><button class="clear" type="button">Clear</button><button class="collapse" type="button">−</button></header>
@@ -6713,19 +6786,23 @@ function findGroups(
     const top = logic.topGifters(state, 5);
     leaders.replaceChildren(...(top.length ? top.map((gifter, index) => {
       const row = element('div', 'top');
-      const identity = [gifter.displayName, gifter.username ? `@${gifter.username}` : null].filter(Boolean).join(' · ');
-      row.append(element('span', '', `${index + 1}. ${identity}`),
-        element('span', '', `${gifter.diamonds.toLocaleString()} 💎`));
+      const identity = element('span', 'identity');
+      identity.append(element('span', 'display-name', `${index + 1}. ${gifter.displayName}`));
+      if (gifter.username) identity.append(element('span', 'username', `@${gifter.username}`));
+      row.append(identity, element('span', '', `${gifter.diamonds.toLocaleString()} 💎`));
       return row;
     }) : [element('div', 'empty', 'No completed gifts yet.')]))
     shadow.querySelector('.history-title').textContent = `Gift history · ${state.gifts.length} event${state.gifts.length === 1 ? '' : 's'}`;
     const list = shadow.querySelector('.list');
     list.replaceChildren(...(state.gifts.length ? state.gifts.map((gift) => {
       const row = element('div', 'row');
+      const highValue = Number(gift.unitDiamonds) >= 999;
+      if (highValue) row.classList.add('high-value');
       const line = element('div', 'line');
-      const senderText = [gift.displayName, gift.username ? `@${gift.username}` : null].filter(Boolean).join(' · ');
-      line.append(element('span', 'sender', senderText),
-        element('span', 'gift', `${gift.giftName} ×${gift.repeatCount}`));
+      const identity = element('span', 'identity');
+      identity.append(element('span', 'display-name', gift.displayName));
+      if (gift.username) identity.append(element('span', 'username', `@${gift.username}`));
+      line.append(identity, element('span', 'gift', `${gift.giftName} ×${gift.repeatCount}`));
       row.append(line);
       const details = [];
       if (gift.diamonds) details.push(`${gift.diamonds.toLocaleString()} 💎`);
@@ -6734,6 +6811,7 @@ function findGroups(
       if (gift.anonymous) details.push(gift.username ? 'Enigma resolved from event ID' :
         gift.resolution === 'stable-id-only' ? 'Enigma: stable ID only' : 'Enigma: identity unavailable');
       row.append(element('div', `meta ${gift.anonymous ? gift.username ? 'resolved' : 'unknown' : ''}`, details.join(' · ')));
+      if (highValue) row.append(element('span', 'premium-badge', '✨ HIGH-VALUE GIFT · 999+ 💎'));
       return row;
     }) : [element('div', 'empty', 'Waiting for gifts…')]))
   }
