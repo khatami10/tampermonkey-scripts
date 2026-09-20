@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.7.1
+// @version      0.7.2
 // @description  Modular TikTok LIVE Battle/PK repair with persistent per-session gift tracking.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -397,6 +397,7 @@
 
     const PANEL_ID = 'tt-1v1-auto-repair-v22';
     const REPORT_ID = 'tt-1v1-auto-repair-v22-report';
+    const MIST_OVERLAY_ID = 'ttlc-mist-score-overlay';
 
     // Keep v2.0 position so upgrading does not reset your panel location.
     const POS_KEY = 'tt_1v1_auto_repair_v20_pos';
@@ -1041,7 +1042,7 @@
             capturedAt:
                 new Date().toISOString(),
 
-            version: '2.6.11',
+            version: '2.6.12',
 
             page:
                 location.href
@@ -1051,7 +1052,7 @@
     // Read-only diagnostics: never substitute a different room's module.
     function captureNativeState() {
         const result = { capturedAt: new Date().toISOString(), page: location.href,
-            version: '2.6.11', dom: domState(), modules: [], partialModules: [] };
+            version: '2.6.12', dom: domState(), modules: [], partialModules: [] };
         try {
             const root = committedRoot();
             if (!root) return { ...result, discovery: 'NO_REACT_ROOT' };
@@ -1641,8 +1642,123 @@
 
     // Targeted, non-destructive partial-state test. It retains the latest real
     // battle message and SEI, then updates the mounted Cohost module in place.
-    const opponentData = { page: null, roomId: null, battle: null, battleAt: 0, battleOpen: null, battleOpenAt: 0, armies: null, armiesAt: 0,
-        sei: null, seiAt: 0, listeners: [], buses: new WeakSet(), emitters: new WeakSet(), busy: false };
+    const opponentData = { page: null, roomId: null, currentAnchorId: null, battle: null, battleAt: 0,
+        battleOpen: null, battleOpenAt: 0, armies: null, armiesAt: 0, sei: null, seiAt: 0,
+        mistUntil: 0, mistBattleId: null, mistSource: null, mistAffectsOpponent: null,
+        listeners: [], buses: new WeakSet(), emitters: new WeakSet(), busy: false };
+
+    function removeMistScoreOverlay() {
+        document.getElementById(MIST_OVERLAY_ID)?.remove();
+    }
+
+    function battleScores(message, currentAnchorId) {
+        const teams = message?.team_armies ?? message?.teamArmies;
+        if (Array.isArray(teams) && teams.length >= 2) {
+            const normalized = teams.map(team => ({
+                score: Number(team?.team_total_score ?? team?.teamTotalScore),
+                users: (team?.team_user ?? team?.teamUser ?? []).map(user =>
+                    sid(user?.user_id_str ?? user?.user_id ?? user?.userId)).filter(Boolean)
+            })).filter(team => Number.isFinite(team.score));
+            const localIndex = normalized.findIndex(team => team.users.includes(currentAnchorId));
+            if (localIndex >= 0) {
+                const opponent = normalized.find((_, index) => index !== localIndex);
+                if (opponent) return { local: normalized[localIndex].score, opponent: opponent.score, source: 'team-total' };
+            }
+        }
+        const armies = message?.armies;
+        const entries = Array.isArray(armies) ? armies.map((value, index) => [String(index), value]) :
+            armies && typeof armies === 'object' ? Object.entries(armies) : [];
+        const normalized = entries.map(([key, raw]) => {
+            const item = raw?.value ?? raw;
+            return { anchorId: sid(item?.anchor_id_str ?? item?.anchor_id ?? key),
+                score: Number(item?.hostScore ?? item?.host_score ?? item?.score) };
+        }).filter(item => Number.isFinite(item.score));
+        const local = normalized.find(item => item.anchorId === currentAnchorId);
+        const opponent = normalized.find(item => item.anchorId !== currentAnchorId);
+        return opponent ? { local: local?.score ?? null, opponent: opponent.score, source: 'host-score' } : null;
+    }
+
+    function opponentScoreLooksCovered() {
+        const scores = [...document.querySelectorAll('.tiktok-3zkaam.ecft6fa17')];
+        const score = scores[1];
+        if (!score) return false;
+        const style = getComputedStyle(score);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) < .2) return true;
+        const rect = score.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return true;
+        const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return !!top && top !== score && !score.contains(top) && !top.contains(score);
+    }
+
+    function ensureMistScoreOverlay() {
+        let overlay = document.getElementById(MIST_OVERLAY_ID);
+        if (overlay || !document.body) return overlay;
+        overlay = document.createElement('div');
+        overlay.id = MIST_OVERLAY_ID;
+        overlay.setAttribute('role', 'status');
+        overlay.setAttribute('aria-live', 'polite');
+        Object.assign(overlay.style, { position: 'fixed', zIndex: '2147483647', left: '50%', top: '72px',
+            transform: 'translateX(-50%)', padding: '6px 11px', border: '1px solid #74d9e8',
+            borderRadius: '16px', color: '#effdff', background: 'rgba(13,51,61,.94)',
+            boxShadow: '0 0 16px rgba(70,208,229,.48),0 8px 22px rgba(0,0,0,.55)',
+            font: 'bold 13px/1.2 Arial,sans-serif', pointerEvents: 'none' });
+        document.body.append(overlay);
+        return overlay;
+    }
+
+    function updateMistScoreOverlay() {
+        const eventMist = Date.now() < opponentData.mistUntil && opponentData.mistAffectsOpponent !== false;
+        if (!moduleEnabled || document.hidden || !opponentData.currentAnchorId ||
+            !opponentData.armies || Date.now() - opponentData.armiesAt > (eventMist ? 45000 : 15000)) {
+            removeMistScoreOverlay();
+            return;
+        }
+        const covered = opponentScoreLooksCovered();
+        if (!eventMist && !covered) {
+            removeMistScoreOverlay();
+            return;
+        }
+        const scores = battleScores(opponentData.armies, opponentData.currentAnchorId);
+        if (!scores || !Number.isFinite(scores.opponent)) {
+            removeMistScoreOverlay();
+            return;
+        }
+        const overlay = ensureMistScoreOverlay();
+        if (!overlay) return;
+        overlay.textContent = `🌫 Opponent score · ${scores.opponent.toLocaleString()}`;
+        overlay.dataset.source = eventMist ? 'mist-event' : 'covered-score';
+    }
+
+    function observeMistCard(message) {
+        const smoke = message?.use_smoke_card ?? message?.useSmokeCard;
+        const isMist = !!smoke || Number(message?.msg_type ?? message?.msgType) === 3;
+        if (!isMist) return;
+        const info = smoke?.card_info ?? smoke?.cardInfo ?? smoke ?? {};
+        const duration = Number(info.effect_last_duration ?? info.effectLastDuration ??
+            message?.duration ?? 30);
+        const effectStart = Number(info.effect_time_sec ?? info.effectTimeSec) * 1000;
+        const targetAnchorId = sid(info.to_anchor_id_str ?? info.toAnchorIdStr ??
+            info.to_anchor_id ?? info.toAnchorId ?? smoke?.anchor_id ?? smoke?.anchorId);
+        opponentData.mistAffectsOpponent = null;
+        if (targetAnchorId && opponentData.currentAnchorId) {
+            const teams = opponentData.armies?.team_armies ?? opponentData.armies?.teamArmies;
+            if (Array.isArray(teams)) {
+                const teamUsers = teams.map(team => (team?.team_user ?? team?.teamUser ?? []).map(user =>
+                    sid(user?.user_id_str ?? user?.user_id ?? user?.userId)).filter(Boolean));
+                const localTeam = teamUsers.findIndex(users => users.includes(opponentData.currentAnchorId));
+                const targetTeam = teamUsers.findIndex(users => users.includes(targetAnchorId));
+                if (localTeam >= 0 && targetTeam >= 0) opponentData.mistAffectsOpponent = localTeam !== targetTeam;
+            }
+            if (opponentData.mistAffectsOpponent == null)
+                opponentData.mistAffectsOpponent = targetAnchorId !== opponentData.currentAnchorId;
+        }
+        const startsAt = Number.isFinite(effectStart) && Math.abs(effectStart - Date.now()) < 300000
+            ? Math.max(Date.now(), effectStart) : Date.now();
+        opponentData.mistUntil = startsAt + Math.max(5, Math.min(90, Number.isFinite(duration) ? duration : 30)) * 1000;
+        opponentData.mistBattleId = sid(message?.battle_id ?? message?.battleId);
+        opponentData.mistSource = smoke ? 'use_smoke_card' : 'msg_type_3';
+        updateMistScoreOverlay();
+    }
 
     function resetOpponentData() {
         for (const { target, event, listener } of opponentData.listeners) {
@@ -1651,9 +1767,13 @@
         opponentData.listeners = [];
         opponentData.buses = new WeakSet();
         opponentData.emitters = new WeakSet();
-        opponentData.page = opponentData.roomId = null;
+        opponentData.page = opponentData.roomId = opponentData.currentAnchorId = null;
         opponentData.battle = opponentData.battleOpen = opponentData.armies = opponentData.sei = null;
         opponentData.battleAt = opponentData.battleOpenAt = opponentData.armiesAt = opponentData.seiAt = 0;
+        opponentData.mistUntil = 0;
+        opponentData.mistBattleId = opponentData.mistSource = null;
+        opponentData.mistAffectsOpponent = null;
+        removeMistScoreOverlay();
     }
 
     function observeOpponentData() {
@@ -1669,6 +1789,7 @@
             opponentData.page = location.href;
             opponentData.roomId = current.roomId;
         }
+        opponentData.currentAnchorId = current.anchorId;
         for (const item of data.imCandidates) {
             const im = item.object;
             if (!imMatchesRoom(im, current.roomId)) continue;
@@ -1684,6 +1805,10 @@
                 if (Number(message.action) === 4) {
                     opponentData.battleOpen = message;
                     opponentData.battleOpenAt = Date.now();
+                } else if (Number(message.action) === 5 || Number(message?.battle_settings?.status) === 3) {
+                    opponentData.mistUntil = 0;
+                    opponentData.mistAffectsOpponent = null;
+                    removeMistScoreOverlay();
                 }
             };
             try {
@@ -1694,9 +1819,17 @@
                     if (roomId !== opponentData.roomId) return;
                     opponentData.armies = message;
                     opponentData.armiesAt = Date.now();
+                    updateMistScoreOverlay();
                 };
                 bus.on('LinkMicArmies', armiesListener);
                 opponentData.listeners.push({ target: bus, event: 'LinkMicArmies', listener: armiesListener });
+                const itemCardListener = message => {
+                    const roomId = sid(message?.common?.room_id);
+                    if (roomId !== opponentData.roomId) return;
+                    observeMistCard(message);
+                };
+                bus.on('LinkMicBattleItemCard', itemCardListener);
+                opponentData.listeners.push({ target: bus, event: 'LinkMicBattleItemCard', listener: itemCardListener });
                 opponentData.buses.add(bus);
             } catch (_) {}
         }
@@ -3488,7 +3621,7 @@
 
     function diagnoseBattle() {
         const previousRepair = lastReport;
-        lastReport = { ...makeReportBase(), version: '2.6.11', mode: 'READ_ONLY_DIAGNOSTIC',
+        lastReport = { ...makeReportBase(), version: '2.6.12', mode: 'READ_ONLY_DIAGNOSTIC',
             nativeState: captureNativeState(), previousRepair };
         showReport();
     }
@@ -6050,7 +6183,7 @@ function findGroups(
             delete child.dataset.expandedDisplay;
         }
         if (head) {
-            head.textContent = 'TikTok Battle Repair · 2.6.11';
+            head.textContent = 'TikTok Battle Repair · 2.6.12';
             head.title = '';
             Object.assign(head.style, { width: 'auto', height: 'auto', display: 'block',
                 alignItems: '', justifyContent: '', padding: '7px', borderRadius: '7px',
@@ -6096,7 +6229,7 @@ function findGroups(
             borderRadius: '10px', padding: '7px', boxSizing: 'border-box', font: '11px Arial',
             boxShadow: '0 12px 32px rgba(0,0,0,.65)' });
         const head = document.createElement('div');
-        head.textContent = 'TikTok Battle Repair · 2.6.11';
+        head.textContent = 'TikTok Battle Repair · 2.6.12';
         Object.assign(head.style, { cursor: 'move', textAlign: 'center', padding: '7px', color: '#d4b1ff',
             fontWeight: 'bold', background: '#21182b', borderRadius: '7px' });
         head.addEventListener('click', () => {
@@ -6186,6 +6319,7 @@ function findGroups(
     setInterval(whenEnabled(() => { if (!document.hidden) refreshPanelStatus(); }), 1000);
     setInterval(whenEnabled(observeMissingLayoutSEI), 4200);
     setInterval(whenEnabled(observeOpponentData), 4700);
+    setInterval(whenEnabled(updateMistScoreOverlay), 700);
     setInterval(whenEnabled(observeTwoVTwo), 5200);
     setInterval(whenEnabled(observeGroupCohost), 5700);
     setInterval(whenEnabled(automaticTwoVTwoTick), 3000);
@@ -6229,7 +6363,7 @@ function findGroups(
     window.__TTLC__?.register({
         id: 'battle-pk',
         name: 'Battle / PK Repair',
-        description: 'Restores missing 1v1/2v2 scores, layouts, and cohost names.',
+        description: 'Restores missing 1v1/2v2 UI and shows the live opponent score while Mist covers it.',
         start() {
             moduleEnabled = true;
             a2.enabled = true;
