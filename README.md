@@ -4,6 +4,10 @@ Personal userscripts with direct installation links and automatic updates throug
 
 ## TikTok
 
+[Install TikTok LIVE Companion](https://raw.githubusercontent.com/khatami10/tampermonkey-scripts/main/tiktok/TikTok-Live-Companion.user.js) — version 0.7.0. Tampermonkey uses this same stable URL for automatic updates.
+
+The Companion currently includes independently switchable Battle/PK Repair and Gift Tracker modules. Existing standalone auto-like scripts are not included or modified.
+
 [Install TikTok Battle Repair](https://raw.githubusercontent.com/khatami10/tampermonkey-scripts/main/tiktok/TikTok-Battle-Repair.user.js) — version 2.6.8, based on the latest local 2.6.7 script.
 
 Open the install link with Tampermonkey enabled, then click Install in Tampermonkey. If you already have an installed copy, review Tampermonkey's replacement prompt first. Only enable one version of Battle Repair at a time.

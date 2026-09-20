@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TikTok LIVE Companion
 // @namespace    local.tiktok.live.companion
-// @version      0.6.0
+// @version      0.7.0
 // @description  Modular TikTok LIVE Battle/PK repair with persistent per-session gift tracking.
 // @match        https://www.tiktok.com/*
 // @run-at       document-start
@@ -6285,6 +6285,65 @@ function findGroups(
     return { nickname, username, userId, secUid, key: secUid || userId || null };
   }
 
+  function imageUrlsOf(value, depth = 0, seen = new WeakSet(), out = []) {
+    if (out.length >= 20 || value == null || depth > 5) return out;
+    if (typeof value === 'string') {
+      if (/^https:\/\//i.test(value)) out.push(value);
+      return out;
+    }
+    if (typeof value !== 'object' || seen.has(value)) return out;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 20)) imageUrlsOf(item, depth + 1, seen, out);
+      return out;
+    }
+    const preferred = ['url_list', 'urlList', 'urls', 'url', 'src', 'image', 'icon', 'badge', 'combine'];
+    for (const key of preferred) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor && 'value' in descriptor) imageUrlsOf(descriptor.value, depth + 1, seen, out);
+    }
+    return out;
+  }
+
+  function firstImageUrl(...values) {
+    for (const value of values) {
+      const url = imageUrlsOf(value)[0];
+      if (url) return url;
+    }
+    return null;
+  }
+
+  function gifterBadgeOf(user) {
+    if (!user || typeof user !== 'object') return { level: null, badgeUrl: null };
+    const grade = user.pay_grade ?? user.payGrade ?? user.paygrade ?? user.gifter_grade ?? user.gifterGrade ?? null;
+    let level = Math.max(0, number(grade?.level ?? user.gifter_level ?? user.gifterLevel ?? user.user_level ?? user.userLevel));
+    const directBadgeUrl = firstImageUrl(
+      grade?.new_im_icon_with_level, grade?.newImIconWithLevel,
+      grade?.im_icon_with_level, grade?.imIconWithLevel
+    );
+    const badgeCollections = [user.badges, user.badge_list, user.badgeList, user.badge_image_list,
+      user.badgeImageList, user.media_badge_image_list, user.mediaBadgeImageList];
+    let matchedBadgeUrl = null;
+    for (const collection of badgeCollections) {
+      const match = imageUrlsOf(collection).find((url) => /grade_badge_icon(?:_lite)?_lv\d+/i.test(url));
+      if (match) { matchedBadgeUrl = match; break; }
+    }
+    const badgeUrl = directBadgeUrl || matchedBadgeUrl;
+    if (!level && badgeUrl) {
+      const match = badgeUrl.match(/grade_badge_icon(?:_lite)?_lv(\d+)/i);
+      if (match) level = number(match[1]);
+    }
+    return { level: level > 0 ? level : null, badgeUrl: badgeUrl || null };
+  }
+
+  function confirmedGloveCritical(value) {
+    const matchInfo = value?.match_info ?? value?.matchInfo;
+    if (!matchInfo || typeof matchInfo !== 'object') return false;
+    const critical = number(matchInfo.critical ?? matchInfo.critical_value ?? matchInfo.criticalValue);
+    const cardInUse = matchInfo.effect_card_in_use ?? matchInfo.effectCardInUse;
+    return critical > 0 && flag(cardInUse);
+  }
+
   function findEvent(value, wantedGift, depth = 0, seen = new WeakSet()) {
     if (!value || typeof value !== 'object' || depth > 5 || seen.has(value)) return null;
     seen.add(value);
@@ -6322,6 +6381,7 @@ function findGroups(
     const user = userOf(value);
     const identity = identityOf(user);
     if (!identity) return null;
+    const gifterBadge = gifterBadgeOf(user);
     const repeatCount = Math.max(1, number(value.repeat_count ?? value.repeatCount ?? value.combo_count ?? value.comboCount, 1));
     const repeatEndValue = value.repeat_end ?? value.repeatEnd ?? value.combo_end ?? value.comboEnd;
     const streakingValue = value.streaking ?? value.is_streaking ?? value.isStreaking;
@@ -6336,7 +6396,10 @@ function findGroups(
       value.common?.msg_id ?? value.common?.message_id ?? value.common?.log_id);
     const createdAt = sid(value.create_time ?? value.createTime ?? value.common?.create_time ?? value.common?.createTime);
     return { raw: value, giftName: giftName || `Gift ${giftId}`, giftId, identity, repeatCount,
-      streakable, final, perUnitDiamonds, anonymous, recipient, messageId, createdAt };
+      streakable, final, perUnitDiamonds, anonymous, recipient, messageId, createdAt,
+      giftImageUrl: firstImageUrl(gift.image, gift.icon, gift.gift_label_icon, gift.giftLabelIcon),
+      gifterLevel: gifterBadge.level, gifterBadgeUrl: gifterBadge.badgeUrl,
+      gloveCritical: confirmedGloveCritical(value) };
   }
 
   function create() {
@@ -6432,6 +6495,8 @@ function findGroups(
       anonymous: parsed.anonymous, resolution, identityKey: parsed.identity.key, giftName: parsed.giftName,
       giftId: parsed.giftId, repeatCount: parsed.repeatCount, unitDiamonds: parsed.perUnitDiamonds,
       diamonds: parsed.perUnitDiamonds * parsed.repeatCount,
+      giftImageUrl: parsed.giftImageUrl, gifterLevel: parsed.gifterLevel,
+      gifterBadgeUrl: parsed.gifterBadgeUrl, gloveCritical: parsed.gloveCritical,
       recipient: parsed.recipient || null, final: parsed.final };
 
     if (parsed.streakable && !parsed.final) {
@@ -6497,6 +6562,7 @@ function findGroups(
   let currentRoomId = null;
   let saveTimer = null;
   let storageWarning = null;
+  let unseenGiftCount = 0;
   const listeners = [];
   let buses = new WeakSet();
 
@@ -6537,6 +6603,7 @@ function findGroups(
     const saved = creator ? readSessions()[creator] : null;
     currentRoomId = saved?.roomId || null;
     state = saved?.state ? logic.restore(saved.state) : logic.create();
+    unseenGiftCount = 0;
   }
 
   function syncCreator() {
@@ -6556,7 +6623,7 @@ function findGroups(
 
   function useRoom(roomId) {
     if (!roomId) return;
-    if (currentRoomId && currentRoomId !== roomId) state = logic.create();
+    if (currentRoomId && currentRoomId !== roomId) { state = logic.create(); unseenGiftCount = 0; }
     if (currentRoomId !== roomId) {
       currentRoomId = roomId;
       scheduleSave();
@@ -6619,6 +6686,8 @@ function findGroups(
     if (!enabled) return;
     const result = logic.consume(state, eventName, args);
     if (result.type !== 'ignored' && result.type !== 'duplicate') {
+      const list = shadow?.querySelector('.list');
+      if (result.type === 'gift' && list && list.scrollTop > 4) unseenGiftCount++;
       scheduleSave();
       scheduleRender();
     }
@@ -6712,7 +6781,7 @@ function findGroups(
     shadow.innerHTML = `
       <style>
         :host { all: initial; }
-        .panel { position: fixed; left: 18px; top: 88px; z-index: 2147483646; width: 330px; color: #f8f5fb;
+        .panel { position: fixed; left: 18px; top: 88px; z-index: 2147483646; width: 360px; color: #f8f5fb;
           background: #15111c; border: 1px solid #70459e; border-radius: 12px; box-shadow: 0 12px 34px #000a;
           overflow: hidden; font: 12px/1.35 system-ui, sans-serif; }
         header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #21172c; cursor: move;
@@ -6725,31 +6794,54 @@ function findGroups(
         .value { display: block; color: #fff; font-weight: 700; font-size: 14px; }
         .label { color: #938b9a; font-size: 10px; } .section { margin: 8px 0 4px; color: #aaa; font-size: 10px;
           letter-spacing: .05em; text-transform: uppercase; }
-        .list { max-height: 190px; overflow: auto; } .row { padding: 6px 4px; border-top: 1px solid #2b2234; }
-        .line { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+        .list { display: grid; gap: 6px; max-height: 260px; overflow: auto; }
+        .row { min-height: 84px; padding: 10px 11px; border-radius: 8px; color: #f8f5fb;
+          background: linear-gradient(90deg, #1e1924, #17131c); box-shadow: inset 0 0 0 1px #342b3d; }
+        .line { display: flex; justify-content: space-between; gap: 11px; align-items: flex-start; }
         .identity { display: flex; flex-wrap: wrap; gap: 3px 6px; min-width: 0; }
         .display-name { color: #f1e8f7; font-weight: 700; } .username { color: #51d7ff; font-weight: 650; }
-        .gift { color: #65e2e8; text-align: right; } .meta, .empty { color: #8f8795; font-size: 10px; }
+        .person { display: flex; align-items: flex-start; gap: 8px; min-width: 0; padding-top: 1px; }
+        .gifter-identity { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+        .gifter-identity .display-name { font-size: 15px; line-height: 1.15; }
+        .gifter-identity .username { font-size: 13px; line-height: 1.15; }
+        .level-badge.native { flex: none; width: 37px; height: 27px; object-fit: contain; }
+        .level-badge.fallback { flex: none; display: flex; align-items: center; justify-content: center; width: 37px;
+          height: 27px; padding-bottom: 2px; clip-path: polygon(14% 5%,86% 5%,100% 34%,83% 86%,50% 100%,17% 86%,0 34%);
+          color: #fff; background: linear-gradient(145deg,#54d6ff,#6162ef 48%,#b348dc); filter: drop-shadow(0 2px 3px #0008);
+          text-shadow: 0 1px 2px #191252; font-size: 11px; font-weight: 800; }
+        .level-badge.fallback::before { content: '★'; margin-right: 2px; color: #fff8b2; font-size: 8px; }
+        .gift-info { flex: none; display: flex; flex-direction: column; align-items: flex-end; min-width: 112px;
+          padding-left: 10px; border-left: 1px solid #3b3342; text-align: right; }
+        .cost-line { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding-bottom: 3px;
+          border-bottom: 1px solid #51475a; white-space: nowrap; }
+        .gift-art { width: 25px; height: 25px; border-radius: 7px; object-fit: contain; background: #302936;
+          box-shadow: inset 0 0 0 1px #ffffff12; }
+        .cost { color: #e9e3ed; font-size: 15px; font-weight: 800; }
+        .gift-name { display: flex; align-items: center; justify-content: flex-end; gap: 7px; margin-top: 6px; color: #bcb4c3; }
+        .glove { color: #ff3b45; font-size: 22px; line-height: 1;
+          filter: sepia(1) saturate(8) hue-rotate(325deg) brightness(1.15) drop-shadow(0 0 4px #ff1f2d) drop-shadow(0 0 9px #ff2336); }
+        .meta, .empty { color: #8f8795; font-size: 10px; }
         .resolved { color: #72e59a; } .unknown { color: #ffbd66; } .top { display: grid; grid-template-columns: 1fr auto;
           gap: 4px 8px; padding: 4px; } [hidden] { display: none !important; }
-        .row.high-value { margin: 5px 0; padding: 8px; border: 1px solid #ffd45c; border-radius: 9px;
-          background: linear-gradient(120deg, #4a2418, #3c183f 55%, #172d42); animation: premiumGlow 1.8s ease-in-out infinite alternate; }
-        .row.high-value .gift { color: #ffe27a; font-weight: 800; text-shadow: 0 0 8px #ffb13b; }
-        .premium-badge { display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 999px;
-          color: #2a1600; background: linear-gradient(90deg, #ffd45c, #ff9bd5); font-size: 9px; font-weight: 900; }
-        @keyframes premiumGlow { from { box-shadow: 0 0 4px #ffd45c55; } to { box-shadow: 0 0 14px #ff8ad888; } }
-        @media (prefers-reduced-motion: reduce) { .row.high-value { animation: none; } }
+        .row.high-value { border: 1px solid #ee4f79; background: radial-gradient(circle at 100% 0,#6b153455,transparent 46%),#1c1118;
+          box-shadow: inset 0 0 22px #df265222,0 0 12px #e9306633; }
+        .row.high-value .gift-info { border-left-color: #ee4f7966; }
+        .row.high-value .cost { color: #ff87a6; font-size: 20px; text-shadow: 0 0 11px #e93066; }
+        .row.high-value .gift-art { width: 30px; height: 30px; background: #44182b; }
+        .row.high-value .gift-name { color: #e7ccd5; }
+        .new-gifts { display: flex; width: 100%; align-items: center; justify-content: space-between; margin: 5px 0 7px;
+          padding: 6px 8px; color: #ddc7ef; background: #2a2033; }
       </style>
       <section class="panel">
         <header><h3>🎁 LIVE Gift Tracker</h3><button class="clear" type="button">Clear</button><button class="collapse" type="button">−</button></header>
         <div class="body"><div class="status"></div><div class="stats"></div>
           <div class="section">Top gifters this LIVE session</div><div class="leaders"></div>
-          <div class="section history-title">Gift history</div><div class="list"></div></div>
+          <div class="section history-title">Gift history</div><button class="new-gifts" type="button" hidden></button><div class="list"></div></div>
       </section>`;
     const panel = shadow.querySelector('.panel');
     const saved = readPosition();
     if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
-      panel.style.left = `${Math.max(0, Math.min(innerWidth - 330, saved.left))}px`;
+      panel.style.left = `${Math.max(0, Math.min(innerWidth - 360, saved.left))}px`;
       panel.style.top = `${Math.max(0, Math.min(innerHeight - 50, saved.top))}px`;
     }
     let drag = null;
@@ -6779,7 +6871,16 @@ function findGroups(
       event.currentTarget.textContent = body.hidden ? '+' : '−';
     });
     shadow.querySelector('.clear').addEventListener('click', () => {
-      state = logic.create(); persistSession(); render();
+      state = logic.create(); unseenGiftCount = 0; persistSession(); render();
+    });
+    const list = shadow.querySelector('.list');
+    list.addEventListener('scroll', () => {
+      if (list.scrollTop <= 4 && unseenGiftCount) { unseenGiftCount = 0; renderNewGiftNotice(); }
+    }, { passive: true });
+    shadow.querySelector('.new-gifts').addEventListener('click', () => {
+      unseenGiftCount = 0;
+      list.scrollTo({ top: 0, behavior: 'smooth' });
+      renderNewGiftNotice();
     });
     render();
   }
@@ -6789,6 +6890,27 @@ function findGroups(
     if (className) node.className = className;
     if (text != null) node.textContent = text;
     return node;
+  }
+
+  function fallbackLevelBadge(level) {
+    return level ? element('span', 'level-badge fallback', String(level)) : null;
+  }
+
+  function imageElement(src, className, alt, fallback = null) {
+    if (!src) return fallback;
+    const node = element('img', className);
+    node.src = src;
+    node.alt = alt || '';
+    node.referrerPolicy = 'no-referrer';
+    node.addEventListener('error', () => fallback ? node.replaceWith(fallback) : node.remove(), { once: true });
+    return node;
+  }
+
+  function renderNewGiftNotice() {
+    const notice = shadow?.querySelector('.new-gifts');
+    if (!notice) return;
+    notice.hidden = unseenGiftCount <= 0;
+    notice.textContent = unseenGiftCount > 0 ? `${unseenGiftCount} new gift${unseenGiftCount === 1 ? '' : 's'} · View newest ↑` : '';
   }
 
   function render() {
@@ -6815,26 +6937,47 @@ function findGroups(
     }) : [element('div', 'empty', 'No completed gifts yet.')]))
     shadow.querySelector('.history-title').textContent = `Gift history · ${state.gifts.length} event${state.gifts.length === 1 ? '' : 's'}`;
     const list = shadow.querySelector('.list');
+    const preserveViewport = list.scrollTop > 4;
+    const previousScrollTop = list.scrollTop;
+    const previousScrollHeight = list.scrollHeight;
     list.replaceChildren(...(state.gifts.length ? state.gifts.map((gift) => {
       const row = element('div', 'row');
       const highValue = Number(gift.unitDiamonds) >= 999;
       if (highValue) row.classList.add('high-value');
       const line = element('div', 'line');
-      const identity = element('span', 'identity');
+      const person = element('div', 'person');
+      const levelFallback = fallbackLevelBadge(gift.gifterLevel);
+      const levelBadge = imageElement(gift.gifterBadgeUrl, 'level-badge native',
+        gift.gifterLevel ? `Gifter level ${gift.gifterLevel}` : 'TikTok gifter level', levelFallback);
+      if (levelBadge) person.append(levelBadge);
+      const identity = element('span', 'gifter-identity');
       identity.append(element('span', 'display-name', gift.displayName));
       if (gift.username) identity.append(element('span', 'username', `@${gift.username}`));
-      line.append(identity, element('span', 'gift', `${gift.giftName} ×${gift.repeatCount}`));
+      person.append(identity);
+      const giftInfo = element('div', 'gift-info');
+      const costLine = element('div', 'cost-line');
+      const giftArt = imageElement(gift.giftImageUrl, 'gift-art', `${gift.giftName} icon`);
+      if (giftArt) costLine.append(giftArt);
+      costLine.append(element('span', 'cost', `${Number(gift.diamonds || 0).toLocaleString()} 💎`));
+      const giftName = element('div', 'gift-name', `${gift.giftName} ×${gift.repeatCount}`);
+      if (gift.gloveCritical) {
+        const glove = element('span', 'glove', '🧤');
+        glove.setAttribute('aria-label', 'Confirmed glove critical');
+        giftName.append(glove);
+      }
+      giftInfo.append(costLine, giftName);
+      line.append(person, giftInfo);
       row.append(line);
       const details = [];
-      if (gift.diamonds) details.push(`${gift.diamonds.toLocaleString()} 💎`);
-      if (gift.recipient) details.push(`to ${gift.recipient}`);
       if (!gift.final) details.push('streaking…');
       if (gift.anonymous) details.push(gift.username ? 'Enigma resolved from event ID' :
         gift.resolution === 'stable-id-only' ? 'Enigma: stable ID only' : 'Enigma: identity unavailable');
-      row.append(element('div', `meta ${gift.anonymous ? gift.username ? 'resolved' : 'unknown' : ''}`, details.join(' · ')));
-      if (highValue) row.append(element('span', 'premium-badge', '✨ HIGH-VALUE GIFT · 999+ 💎'));
+      if (details.length) row.append(element('div', `meta ${gift.anonymous ? gift.username ? 'resolved' : 'unknown' : ''}`, details.join(' · ')));
       return row;
     }) : [element('div', 'empty', 'Waiting for gifts…')]))
+    if (preserveViewport) list.scrollTop = previousScrollTop + Math.max(0, list.scrollHeight - previousScrollHeight);
+    else list.scrollTop = 0;
+    renderNewGiftNotice();
   }
 
   function scheduleRender() {
@@ -6864,10 +7007,9 @@ function findGroups(
   window.__TTLC__?.register({
     id: MODULE_ID,
     name: 'Gift Tracker',
-    description: 'Shows recent gifts, diamonds, top gifters, recipients, and evidence-based Enigma identity.',
+    description: 'Shows gift history, diamonds, gifter identity and levels, gift artwork, and confirmed glove criticals.',
     start,
     stop,
     status() { return enabled ? scanStatus : 'Off'; }
   });
 })();
-
